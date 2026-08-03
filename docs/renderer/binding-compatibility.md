@@ -1,0 +1,7 @@
+# Native binding compatibility
+
+Production renderer code and experimental spike code must keep Java 11 bytecode compatibility. Builds may run on the project-local JDK 21 toolchain, but every Java compile task remains `--release 11`; a spike that requires newer bytecode is not compatible with the RuneLite loading boundary. The pinned RuneLite source sets `options.release = 11` for Java compilation in [`common.settings.gradle.kts`](https://github.com/runelite/runelite/blob/348035815f2caeaba26a3fdb05309e0f0c204562/common.settings.gradle.kts).
+
+RuneLite's pinned version catalog declares LWJGL `3.3.2`, and its client build consumes the matching LWJGL core, OpenGL, OpenCL, and native classifiers. Any Vulkan, JAWT, or core binding added by a spike must therefore align its LWJGL modules and transitives to the same `3.3.2` line. See the pinned [`libs.versions.toml`](https://github.com/runelite/runelite/blob/348035815f2caeaba26a3fdb05309e0f0c204562/libs.versions.toml) and [`runelite-client/build.gradle.kts`](https://github.com/runelite/runelite/blob/348035815f2caeaba26a3fdb05309e0f0c204562/runelite-client/build.gradle.kts).
+
+Do not introduce, bundle, or shade a second LWJGL core or native set. A binding with its own LWJGL transitive dependencies must exclude them and use RuneLite's existing `3.3.2` runtime set. This avoids duplicate classes and competing native-library extraction/loading within one RuneLite process.

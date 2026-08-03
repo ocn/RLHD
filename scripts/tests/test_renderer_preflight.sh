@@ -43,6 +43,16 @@ test "$ready_status" -eq 0
 printf '%s\n' "$ready_output" | grep -F 'PASS  Gradle wrapper: version 8.10 (gradle-8.10-all.zip)' >/dev/null
 printf '%s\n' "$ready_output" | grep -F 'READINESS: READY for local performance measurements' >/dev/null
 
+outside_dir="$(cd "$root/.." && pwd)"
+relative_script="./${root##*/}/scripts/renderer-preflight.sh"
+set +e
+relative_output="$(cd "$outside_dir" && unset PREFLIGHT_GRADLE_WRAPPER_PROPERTIES && PATH="$ready_fixture:/bin" "$relative_script" --check 2>&1)"
+relative_status=$?
+set -e
+test "$relative_status" -eq 0
+printf '%s\n' "$relative_output" | grep -F 'PASS  Gradle wrapper: version 8.10 (gradle-8.10-all.zip)' >/dev/null
+printf '%s\n' "$relative_output" | grep -F 'READINESS: READY for local performance measurements' >/dev/null
+
 broken_java_fixture="$root/scripts/tests/fixtures/preflight-broken-java"
 set +e
 broken_java_output="$(PATH="$broken_java_fixture:/bin" "$script" --check 2>&1)"

@@ -39,3 +39,11 @@ No renderer production code, dependencies, installed tools, or external reposito
 - Live-host strict status is environment-portable (`0` or `2`); isolated fixtures continue to require exact ready (`0`) and not-ready (`2`) results.
 - From repository root: `scripts/tests/test_renderer_preflight.sh` — exit `0`, `renderer-preflight shell tests: PASS`.
 - From `scripts/tests`: `./test_renderer_preflight.sh` — exit `0`, `renderer-preflight shell tests: PASS`.
+
+## Review-fix verification: Round 3
+
+- Added `docs/renderer/binding-compatibility.md`, backed by pinned RuneLite commit `348035815f2caeaba26a3fdb05309e0f0c204562`: production and spike Java bytecode remains release 11; all LWJGL Vulkan/JAWT/core modules and transitives align to RuneLite's `3.3.2` line; no second or shaded LWJGL core/native set is allowed.
+- Updated the toolchain guide to distinguish the initial baseline from the non-persistent `/private/tmp/rlhd-toolchains` session provisioning: Temurin `21.0.12` arm64 and Vulkan SDK `1.4.350.1` with GLSLang/SPIR-V Tools are available, while Metal remains unavailable after `xcodebuild -downloadComponent metalToolchain` exits `70` on the Xcode plugin/system-framework mismatch. Strict readiness therefore fails only on Metal when those paths are active.
+- Added an outside-repository test that changes to the worktree's parent, unsets `PREFLIGHT_GRADLE_WRAPPER_PROPERTIES`, invokes `./RLHD-modern-renderer/scripts/renderer-preflight.sh` through a relative path with deterministic tool fixtures, and requires the Gradle wrapper pass plus ready status.
+- Fresh syntax check: exit `0`.
+- Fresh shell tests from repository root and from `scripts/tests`: both exit `0` with `renderer-preflight shell tests: PASS`.
