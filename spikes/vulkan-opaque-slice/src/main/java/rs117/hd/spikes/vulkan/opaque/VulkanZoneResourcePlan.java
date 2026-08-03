@@ -21,6 +21,7 @@ public final class VulkanZoneResourcePlan implements RendererBackend {
 	private final ResourceLedger ledger = new ResourceLedger();
 	private final Map<Location, Allocation> zones = new HashMap<>();
 	private boolean closed;
+	private long renderWorkCount;
 
 	public VulkanZoneResourcePlan(ResourceAllocator allocator) {
 		this.allocator = Objects.requireNonNull(allocator, "allocator");
@@ -49,7 +50,9 @@ public final class VulkanZoneResourcePlan implements RendererBackend {
 		if (closed || frame == null) return FrameOutcome.BACKEND_FAILURE;
 		if (frame.viewport().isZero()) return FrameOutcome.SUSPENDED_ZERO_EXTENT;
 		Allocation allocation = zones.get(Location.of(frame.zone()));
-		return allocation != null && allocation.key.equals(frame.zone()) ? FrameOutcome.RENDERED : FrameOutcome.REJECTED_INPUT;
+		if (allocation == null || !allocation.key.equals(frame.zone())) return FrameOutcome.REJECTED_INPUT;
+		renderWorkCount++;
+		return FrameOutcome.RENDERED;
 	}
 
 	@Override
@@ -64,6 +67,7 @@ public final class VulkanZoneResourcePlan implements RendererBackend {
 	}
 
 	public synchronized int liveResourceCount() { return ledger.liveCount(); }
+	public synchronized long renderWorkCount() { return renderWorkCount; }
 
 	@Override
 	public synchronized void close() {

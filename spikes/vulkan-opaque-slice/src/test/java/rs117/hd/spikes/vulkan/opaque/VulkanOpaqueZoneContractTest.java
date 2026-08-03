@@ -8,8 +8,9 @@ import java.nio.ByteOrder;
 import java.nio.IntBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.regex.Pattern;
 import org.junit.Test;
 import rs117.hd.renderer.CameraUniforms;
 import rs117.hd.renderer.FrameOutcome;
@@ -110,6 +111,20 @@ public class VulkanOpaqueZoneContractTest {
 	}
 
 	@Test
+	public void negativeViewportPinsClockwiseFrontFaceAndBackCulling() {
+		float[] a = VulkanOpaqueZoneContract.negativeViewportPoint(new float[] { -.5f, -.5f, 0, 1 }, 100, 100);
+		float[] b = VulkanOpaqueZoneContract.negativeViewportPoint(new float[] { .5f, -.5f, 0, 1 }, 100, 100);
+		float[] c = VulkanOpaqueZoneContract.negativeViewportPoint(new float[] { 0, .5f, 0, 1 }, 100, 100);
+		assertArrayEquals(new float[] { 25, 75 }, a, 0);
+		assertArrayEquals(new float[] { 75, 75 }, b, 0);
+		assertArrayEquals(new float[] { 50, 25 }, c, 0);
+		assertEquals(-2500f, VulkanOpaqueZoneContract.signedArea2(a, b, c), 0);
+		assertEquals("CLOCKWISE", VulkanOpaqueZoneContract.manifest().frontFace());
+		assertEquals("BACK", VulkanOpaqueZoneContract.manifest().cullMode());
+		assertTrue(VulkanOpaqueZoneContract.isFrontFacing(a, b, c));
+	}
+
+	@Test
 	public void resourcePlanReplacesGenerationAndRejectsUnknownZone() throws Exception {
 		RecordingAllocator allocator = new RecordingAllocator();
 		VulkanZoneResourcePlan plan = new VulkanZoneResourcePlan(allocator);
@@ -134,8 +149,13 @@ public class VulkanOpaqueZoneContractTest {
 		VulkanZoneResourcePlan plan = new VulkanZoneResourcePlan(allocator);
 		ZoneKey key = new ZoneKey(0, 5, 5, 1);
 		plan.uploadZone(key, baseGeometry());
+		int createdBefore = allocator.created.get();
+		int closedBefore = allocator.closed.get();
+		long workBefore = plan.renderWorkCount();
 		assertEquals(FrameOutcome.SUSPENDED_ZERO_EXTENT, plan.render(frame(key, new SurfaceExtent(0, 480))));
-		assertEquals(2, allocator.created.get());
+		assertEquals(createdBefore, allocator.created.get());
+		assertEquals(closedBefore, allocator.closed.get());
+		assertEquals(workBefore, plan.renderWorkCount());
 	}
 
 	@Test
@@ -178,33 +198,42 @@ public class VulkanOpaqueZoneContractTest {
 
 	@Test
 	public void reflectionPinsShaderInterfacesWithoutClaimingPipelineCorrectness() throws Exception {
-		String opaqueVertex = resource("/shaders/vulkan-opaque-slice/opaque.vert.reflect.json");
-		String opaqueFragment = resource("/shaders/vulkan-opaque-slice/opaque.frag.reflect.json");
-		String uiVertex = resource("/shaders/vulkan-opaque-slice/ui.vert.reflect.json");
-		String uiFragment = resource("/shaders/vulkan-opaque-slice/ui.frag.reflect.json");
-		for (int location = 0; location < 4; location++) assertTrue(hasNumber(opaqueVertex, "location", location));
-		assertTrue(hasNumber(opaqueVertex, "set", 0));
-		assertTrue(hasNumber(opaqueVertex, "binding", 0));
-		assertTrue(hasNumber(opaqueVertex, "array_stride", 4));
-		assertTrue(opaqueVertex.contains("\"push_constants\""));
-		assertTrue(hasNumber(opaqueVertex, "block_size", 72));
-		assertTrue(Pattern.compile("clipFromWorld.*?\\\"offset\\\"\\s*:\\s*0", Pattern.DOTALL).matcher(opaqueVertex).find());
-		assertTrue(Pattern.compile("sceneBase.*?\\\"offset\\\"\\s*:\\s*64", Pattern.DOTALL).matcher(opaqueVertex).find());
-		assertTrue(hasNumber(opaqueFragment, "location", 0));
-		assertTrue(hasNumber(uiVertex, "location", 0));
-		assertTrue(uiFragment.contains("\"textures\""));
-		assertTrue(hasNumber(uiFragment, "set", 0));
-		assertTrue(hasNumber(uiFragment, "binding", 0));
+		VulkanReflectionContract.validateAll(reflections());
 	}
 
-	private static boolean hasNumber(String json, String field, int value) {
-		return Pattern.compile("\\\"" + Pattern.quote(field) + "\\\"\\s*:\\s*" + value + "(?:,|\\s|})").matcher(json).find();
+	@Test
+	public void reflectionGateRejectsMutatedMappingsAndUnexpectedInterfaces() throws Exception {
+		Map<String, String> mappings = reflections();
+		String opaqueVertex = mappings.get("opaque.vert");
+		Map<String, String> wrongLocation = new LinkedHashMap<>(mappings);
+		wrongLocation.put("opaque.vert", opaqueVertex.replaceFirst("\\\"location\\\"\\s*:\\s*3", "\"location\": 4"));
+		assertThrows(IllegalArgumentException.class, () -> VulkanReflectionContract.validateAll(wrongLocation));
+
+		Map<String, String> extraInput = new LinkedHashMap<>(mappings);
+		extraInput.put("opaque.vert", opaqueVertex.replaceFirst("\\\"inputs\\\"\\s*:\\s*\\[",
+			"\"inputs\": [{\"type\":\"vec4\",\"name\":\"extra\",\"location\":9},"));
+		assertThrows(IllegalArgumentException.class, () -> VulkanReflectionContract.validateAll(extraInput));
+	}
+
+	@Test
+	public void productionIsolationPolicyRejectsAllRendererNativeArtifacts() {
+		for (String name : Arrays.asList("lwjgl-3.3.2.jar", "lwjgl-opengl.jar", "lwjgl-vulkan.jar",
+			"MoltenVK.dylib", "renderer-natives-macos.jar", "libvulkan.so", "vulkan-1.dll"))
+			assertTrue(name, VulkanProductionIsolation.isForbiddenDependencyName(name));
+		assertFalse(VulkanProductionIsolation.isForbiddenDependencyName("gson-2.14.0.jar"));
+	}
+
+	private static Map<String, String> reflections() throws Exception {
+		Map<String, String> reflections = new LinkedHashMap<>();
+		for (String shader : Arrays.asList("opaque.vert", "opaque.frag", "ui.vert", "ui.frag"))
+			reflections.put(shader, resource("/shaders/vulkan-opaque-slice/" + shader + ".reflect.json"));
+		return reflections;
 	}
 
 	private static PreparedFrame frame(ZoneKey key, SurfaceExtent extent) {
 		return new PreparedFrame(key, new CameraUniforms(new float[] {
 			1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1
-		}), extent, new PreparedUiTexture(1, 1, 4,
+		}), 640, 704, extent, new PreparedUiTexture(1, 1, 4,
 			PreparedUiTexture.PixelFormat.BGRA8_SRGB_PREMULTIPLIED, ByteBuffer.allocate(4)));
 	}
 

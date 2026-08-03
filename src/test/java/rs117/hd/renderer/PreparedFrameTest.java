@@ -25,6 +25,8 @@ public class PreparedFrameTest {
 		PreparedFrame frame = new PreparedFrame(
 			key,
 			new CameraUniforms(matrix),
+			3200,
+			3264,
 			new SurfaceExtent(2, 2),
 			new PreparedUiTexture(2, 2, 8, PreparedUiTexture.PixelFormat.BGRA8_SRGB_PREMULTIPLIED, pixels)
 		);
@@ -45,6 +47,8 @@ public class PreparedFrameTest {
 		assertThrows(ReadOnlyBufferException.class, () -> snapshot.put(0, (byte) 4));
 		assertNotSame(snapshot, frame.ui().pixels());
 		assertEquals(key, frame.zone());
+		assertEquals(3200, frame.sceneBaseX());
+		assertEquals(3264, frame.sceneBaseZ());
 	}
 
 	@Test

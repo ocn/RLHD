@@ -89,6 +89,12 @@ dependencies.add('vulkanControlSpikeImplementation', 'org.lwjgl:lwjgl:3.3.2')
 dependencies.add('vulkanControlSpikeImplementation', 'org.lwjgl:lwjgl-vulkan:3.3.2')
 dependencies.add('vulkanControlSpikeRuntimeOnly', 'org.lwjgl:lwjgl:3.3.2:natives-macos-arm64')
 dependencies.add('vulkanControlSpikeTestImplementation', 'junit:junit:4.13.2')
+dependencies.add('vulkanOpaqueSliceImplementation', 'com.google.code.gson:gson:2.14.0') {
+	transitive = false
+}
+dependencies.add('vulkanOpaqueSliceTestImplementation', 'com.google.code.gson:gson:2.14.0') {
+	transitive = false
+}
 
 def macSurfaceSpikeDir = file('spikes/macos-surface')
 def macSurfaceNativeDir = layout.buildDirectory.dir('spikes/macos-surface/native')
@@ -400,6 +406,19 @@ tasks.register('vulkanOpaqueSliceTest', Test) {
 	exclude '**/*IntegrationTest.class'
 }
 
+tasks.register('validateVulkanOpaqueSliceReflection', JavaExec) {
+	group = 'verification'
+	description = 'Parses and validates the exact interfaces of all four offline Vulkan shaders.'
+	dependsOn tasks.named(sourceSets.vulkanOpaqueSlice.classesTaskName)
+	classpath = sourceSets.vulkanOpaqueSlice.runtimeClasspath
+	mainClass = 'rs117.hd.spikes.vulkan.opaque.VulkanReflectionContract'
+	doFirst {
+		args = vulkanOpaqueSliceShaderNames.collect { shaderName ->
+			vulkanOpaqueSliceOutputDir.get().file("shaders/vulkan-opaque-slice/${shaderName}.reflect.json").asFile.absolutePath
+		}
+	}
+}
+
 tasks.register('vulkanOpaqueSliceJar', Jar) {
 	group = BasePlugin.BUILD_GROUP
 	description = 'Builds the isolated offline Vulkan opaque-zone contract artifact.'
@@ -408,33 +427,27 @@ tasks.register('vulkanOpaqueSliceJar', Jar) {
 	from sourceSets.vulkanOpaqueSlice.output
 }
 
-tasks.register('vulkanOpaqueSliceDependencyIsolation') {
+tasks.register('vulkanOpaqueSliceDependencyIsolation', JavaExec) {
 	group = 'verification'
 	description = 'Proves the offline Vulkan slice and normal production artifact remain isolated.'
-	dependsOn tasks.named('jar'), tasks.named('vulkanOpaqueSliceJar')
-	doLast {
-		def dependencies = configurations.vulkanOpaqueSliceRuntimeClasspath.files.findAll { it.isFile() }.collect { it.name }
-		if (!dependencies.isEmpty()) {
-			throw new GradleException("Offline Vulkan slice acquired external runtime dependencies: ${dependencies}")
+	dependsOn tasks.named('jar'), tasks.named('vulkanOpaqueSliceJar'), tasks.named(sourceSets.vulkanOpaqueSlice.classesTaskName)
+	classpath = sourceSets.vulkanOpaqueSlice.runtimeClasspath
+	mainClass = 'rs117.hd.spikes.vulkan.opaque.VulkanProductionIsolation'
+	doFirst {
+		def isolatedDependencies = configurations.vulkanOpaqueSliceRuntimeClasspath.files.findAll { it.isFile() }.collect { it.name }
+		if (isolatedDependencies != ['gson-2.14.0.jar']) {
+			throw new GradleException("Offline Vulkan slice dependency set is not exact: ${isolatedDependencies}")
 		}
-		def productionEntries = []
-		zipTree(tasks.named('jar').get().archiveFile.get().asFile).visit {
-			if (!it.directory) productionEntries.add(it.relativePath.pathString)
-		}
-		if (productionEntries.any { it.startsWith('rs117/hd/spikes/vulkan/opaque/') || it.startsWith('shaders/vulkan-opaque-slice/') }) {
-			throw new GradleException("Offline Vulkan slice leaked into the production jar: ${productionEntries}")
-		}
-		def productionRuntime = configurations.runtimeClasspath.files.collect { it.name }
-		if (productionRuntime.any { it.startsWith('lwjgl-vulkan') }) {
-			throw new GradleException("Vulkan runtime leaked into production: ${productionRuntime}")
-		}
+		args = [tasks.named('jar').get().archiveFile.get().asFile.absolutePath] +
+			configurations.runtimeClasspath.files.collect { it.absolutePath }
 	}
 }
 
 tasks.register('vulkanOpaqueSliceCheck') {
 	group = 'verification'
 	description = 'Runs every CPU/offline check for the isolated Vulkan opaque-zone contract.'
-	dependsOn tasks.named('validateVulkanOpaqueSliceShaders'), tasks.named('vulkanOpaqueSliceTest'),
+	dependsOn tasks.named('validateVulkanOpaqueSliceShaders'), tasks.named('validateVulkanOpaqueSliceReflection'),
+		tasks.named('vulkanOpaqueSliceTest'),
 		tasks.named('vulkanOpaqueSliceDependencyIsolation'), tasks.named('vulkanOpaqueSliceJar')
 }
 

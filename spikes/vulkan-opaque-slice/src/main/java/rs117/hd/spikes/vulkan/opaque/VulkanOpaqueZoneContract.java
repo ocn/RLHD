@@ -59,6 +59,25 @@ public final class VulkanOpaqueZoneContract {
 		return incomingDepth >= storedDepth;
 	}
 
+	public static float[] negativeViewportPoint(float[] clip, int width, int height) {
+		if (clip == null || clip.length != 4 || clip[3] == 0)
+			throw new IllegalArgumentException("A projectable clip position requires four values and nonzero W");
+		if (width < 0 || height < 0) throw new IllegalArgumentException("Viewport extent must be non-negative");
+		float ndcX = clip[0] / clip[3];
+		float ndcY = clip[1] / clip[3];
+		return new float[] { (ndcX + 1) * width * .5f, (1 - ndcY) * height * .5f };
+	}
+
+	public static float signedArea2(float[] a, float[] b, float[] c) {
+		if (a == null || b == null || c == null || a.length != 2 || b.length != 2 || c.length != 2)
+			throw new IllegalArgumentException("Projected points must contain exactly X and Y");
+		return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+	}
+
+	public static boolean isFrontFacing(float[] a, float[] b, float[] c) {
+		return signedArea2(a, b, c) < 0;
+	}
+
 	private static void validateRanges(List<PreparedDrawRange> ranges, int opaqueCount) {
 		List<PreparedDrawRange> ordered = new ArrayList<>(ranges);
 		ordered.sort(Comparator.comparingInt(PreparedDrawRange::firstVertex));
@@ -146,5 +165,7 @@ public final class VulkanOpaqueZoneContract {
 		public String colorSpace() { return "SRGB_NONLINEAR"; }
 		public String uiSourceColorBlendFactor() { return "ONE"; }
 		public String uiDestinationColorBlendFactor() { return "ONE_MINUS_SRC_ALPHA"; }
+		public String frontFace() { return "CLOCKWISE"; }
+		public String cullMode() { return "BACK"; }
 	}
 }
