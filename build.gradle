@@ -89,6 +89,15 @@ def metalControlNativeLibrary = metalControlNativeDir.map { it.file('librlhd_met
 def vulkanControlSpikeDir = file('spikes/vulkan-control')
 def vulkanControlShaderOutputDir = layout.buildDirectory.dir('generated/spikes/vulkan-control/resources')
 def vulkanControlShaderNames = ['triangle.vert', 'triangle.frag', 'ui.vert', 'ui.frag']
+def rendererHeadfulAcknowledgement = 'I_ACCEPT_KERNEL_PANIC_RISK'
+def requireRendererHeadfulAcknowledgement = { task ->
+	def supplied = providers.gradleProperty('rendererHeadfulAcknowledgement').orNull
+	if (supplied != rendererHeadfulAcknowledgement) {
+		throw new GradleException("${task.path} creates a native presentation surface and is blocked by default. " +
+			"Run CPU-only checks instead. To override after reviewing the host risk, pass " +
+			"-PrendererHeadfulAcknowledgement=${rendererHeadfulAcknowledgement}.")
+	}
+}
 
 sourceSets.vulkanControlSpike.resources.srcDir(vulkanControlShaderOutputDir)
 
@@ -261,6 +270,7 @@ tasks.register('macSurfaceIntegrationTest', Test) {
 	systemProperty 'java.awt.headless', 'false'
 	systemProperty 'rlhd.spike.macos.integration', 'true'
 	systemProperty 'rlhd.spike.macos.library', macSurfaceNativeLibrary.get().asFile.absolutePath
+	doFirst { task -> requireRendererHeadfulAcknowledgement(task) }
 }
 
 tasks.register('macSurfaceSpikeJar', Jar) {
@@ -317,6 +327,7 @@ tasks.register('vulkanControlIntegrationTest', Test) {
 	if (configuredVulkanLoader) {
 		systemProperty 'rlhd.spike.vulkan.loader', configuredVulkanLoader
 	}
+	doFirst { task -> requireRendererHeadfulAcknowledgement(task) }
 }
 
 tasks.register('runVulkanControlSpike', JavaExec) {
@@ -332,6 +343,7 @@ tasks.register('runVulkanControlSpike', JavaExec) {
 	if (configuredVulkanLoader) {
 		systemProperty 'rlhd.spike.vulkan.loader', configuredVulkanLoader
 	}
+	doFirst { task -> requireRendererHeadfulAcknowledgement(task) }
 }
 
 tasks.register('vulkanControlSpikeJar', Jar) {
@@ -416,6 +428,7 @@ tasks.register('metalControlIntegrationTest', Test) {
 	systemProperty 'rlhd.spike.metal.integration', 'true'
 	systemProperty 'rlhd.spike.macos.library', macSurfaceNativeLibrary.get().asFile.absolutePath
 	systemProperty 'rlhd.spike.metal.library', metalControlNativeLibrary.get().asFile.absolutePath
+	doFirst { task -> requireRendererHeadfulAcknowledgement(task) }
 }
 
 tasks.register('runMetalControlSpike', JavaExec) {
@@ -427,6 +440,7 @@ tasks.register('runMetalControlSpike', JavaExec) {
 	systemProperty 'java.awt.headless', 'false'
 	systemProperty 'rlhd.spike.macos.library', macSurfaceNativeLibrary.get().asFile.absolutePath
 	systemProperty 'rlhd.spike.metal.library', metalControlNativeLibrary.get().asFile.absolutePath
+	doFirst { task -> requireRendererHeadfulAcknowledgement(task) }
 }
 
 tasks.register('metalControlSpikeJar', Jar) {

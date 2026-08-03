@@ -21,11 +21,13 @@ Use a full native arm64 JDK. The path below is a session-local example, not a re
 ```sh
 export RLHD_METAL_JAVA_HOME=/absolute/path/to/arm64-jdk/Contents/Home
 JAVA_HOME="$RLHD_METAL_JAVA_HOME" ./gradlew --no-daemon metalControlSpikeCheck metalControlSpikeJar
-JAVA_HOME="$RLHD_METAL_JAVA_HOME" ./gradlew --no-daemon metalControlIntegrationTest
-JAVA_HOME="$RLHD_METAL_JAVA_HOME" ./gradlew --no-daemon runMetalControlSpike --args='--seconds 1800 --log build/spikes/metal-control/manual-30m.jsonl'
+JAVA_HOME="$RLHD_METAL_JAVA_HOME" ./gradlew --no-daemon metalControlIntegrationTest -PrendererHeadfulAcknowledgement=I_ACCEPT_KERNEL_PANIC_RISK
+JAVA_HOME="$RLHD_METAL_JAVA_HOME" ./gradlew --no-daemon runMetalControlSpike -PrendererHeadfulAcknowledgement=I_ACCEPT_KERNEL_PANIC_RISK --args='--seconds 1800 --log build/spikes/metal-control/manual-30m.jsonl'
 ```
 
 `metalControlIntegrationTest` is explicitly headful and opens/resizes/fullscreens an AWT window. It runs 240 changing frames, toggles presentation behavior, suspends/restores, verifies actual presentation callbacks, performs the dual-Java-frame GPU readback, and exercises close/acquisition/mode/callback/upload/present failure seams. It is intentionally excluded from normal `test`, `check`, and `jar`.
+
+Headful spike tasks are fail-closed because they create native presentation surfaces. Use the acknowledgement only on an expendable test host after reviewing its display topology and kernel-panic risk.
 
 The standalone program's default log is `build/spikes/metal-control/metal-control.jsonl`; the 30-minute command above uses `build/spikes/metal-control/manual-30m.jsonl`.
 

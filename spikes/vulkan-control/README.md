@@ -24,11 +24,13 @@ export VK_LAYER_PATH="$RLHD_VULKAN_SDK/share/vulkan/explicit_layer.d"
 export DYLD_LIBRARY_PATH="$RLHD_MOLTENVK:$RLHD_VULKAN_SDK/lib"
 
 JAVA_HOME="$RLHD_VULKAN_JAVA_HOME" ./gradlew --no-daemon vulkanControlSpikeCheck vulkanControlSpikeJar
-JAVA_HOME="$RLHD_VULKAN_JAVA_HOME" ./gradlew --no-daemon vulkanControlIntegrationTest
-JAVA_HOME="$RLHD_VULKAN_JAVA_HOME" ./gradlew --no-daemon runVulkanControlSpike --args='--seconds 1800 --log build/spikes/vulkan-control/manual-30m.jsonl --validation true'
+JAVA_HOME="$RLHD_VULKAN_JAVA_HOME" ./gradlew --no-daemon vulkanControlIntegrationTest -PrendererHeadfulAcknowledgement=I_ACCEPT_KERNEL_PANIC_RISK
+JAVA_HOME="$RLHD_VULKAN_JAVA_HOME" ./gradlew --no-daemon runVulkanControlSpike -PrendererHeadfulAcknowledgement=I_ACCEPT_KERNEL_PANIC_RISK --args='--seconds 1800 --log build/spikes/vulkan-control/manual-30m.jsonl --validation true'
 ```
 
 `vulkanControlSpikeCheck` compiles and validates all SPIR-V, runs the swapchain-selection/renderer/schema tests, builds and inspects the isolated artifact, verifies the exact runtime dependency set, and reuses the Task 2 surface checks. `vulkanControlIntegrationTest` is explicitly headful. Its main test performs GPU readback and renders 199 submitted frames through resize, zero-extent suspend/restore, FIFO/IMMEDIATE toggles, and native fullscreen when supported. A second live-backend test injects failures into command, buffer, image, shader-module, readback, and partial-swapchain allocation as well as acquire-record-submit, recreation, and post-consumption close. Every injected path requires zero validation warnings/errors and zero app-tracked live Vulkan objects; submitted paths also require balanced counters.
+
+Headful spike tasks are fail-closed because they create native presentation surfaces. Use the acknowledgement only on an expendable test host after reviewing its display topology and kernel-panic risk.
 
 The exact runtime configuration is Gson 2.14.0 without transitive annotations, LWJGL 3.3.2 core, its macOS arm64 core native, and the Java-only `lwjgl-vulkan` binding. It deliberately does not request a nonexistent `lwjgl-vulkan` native. The isolation gate rejects extra spike runtime jars, LWJGL in production runtime, spike content in the production jar, and undeclared paths in `vulkanControlSpikeJar`. The Vulkan loader and MoltenVK ICD are external prerequisites and are not packaged.
 

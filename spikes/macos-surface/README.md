@@ -18,9 +18,11 @@ JAVA_HOME="$RLHD_MAC_SURFACE_JAVA_HOME" ./gradlew --no-daemon macSurfaceSpikeChe
 The explicit native integration test opens a small AWT window and performs 100 real JAWT attach/resize/suspend/restore/detach cycles:
 
 ```sh
-JAVA_HOME="$RLHD_MAC_SURFACE_JAVA_HOME" ./gradlew --no-daemon macSurfaceIntegrationTest
+JAVA_HOME="$RLHD_MAC_SURFACE_JAVA_HOME" ./gradlew --no-daemon macSurfaceIntegrationTest -PrendererHeadfulAcknowledgement=I_ACCEPT_KERNEL_PANIC_RISK
 ```
 
 It is intentionally excluded from `test`, `check`, `jar`, and `macSurfaceSpikeCheck`. It is not suitable for unattended or headless Plugin Hub CI because a displayable macOS Canvas and active window server are required. The deterministic Java tests use an injected native boundary, and the native C harness exercises the same lifecycle state implementation without opening a window.
 
 Normal `./gradlew test` and `./gradlew jar` remain production-only. The spike Java artifact is built only by `macSurfaceSpikeJar`; the native artifact is built only by `buildMacSurfaceNative`, `macSurfaceIntegrationTest`, or `macSurfaceSpikeCheck`.
+
+Headful spike tasks are fail-closed because they create native presentation surfaces. Use the acknowledgement only on an expendable test host after reviewing its display topology and kernel-panic risk.
