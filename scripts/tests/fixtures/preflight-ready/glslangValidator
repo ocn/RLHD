@@ -1,0 +1,2 @@
+#!/bin/sh
+printf 'glslangValidator 14.3.0\n'

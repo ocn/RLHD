@@ -31,23 +31,41 @@ if [ "$os_name" = Darwin ] && command -v sysctl >/dev/null 2>&1; then
 fi
 
 if command -v java >/dev/null 2>&1; then
-  java_properties="$(java -XshowSettings:properties -version 2>&1 || true)"
-  java_version="$(printf '%s\n' "$java_properties" | sed -n 's/^[[:space:]]*java.version = //p' | sed -n '1p')"
-  java_arch="$(printf '%s\n' "$java_properties" | sed -n 's/^[[:space:]]*os.arch = //p' | sed -n '1p')"
-  java_vendor="$(printf '%s\n' "$java_properties" | sed -n 's/^[[:space:]]*java.vendor = //p' | sed -n '1p')"
-  pass 'JVM' "${java_vendor:-unknown} ${java_version:-unknown} (${java_arch:-unknown})"
-  if [ "$os_name" = Darwin ] && [ "$cpu_arch" = arm64 ] && [ "${java_arch:-unknown}" != aarch64 ] && [ "${java_arch:-unknown}" != arm64 ]; then
-    fail 'Native JVM architecture' "host is $cpu_arch but java reports ${java_arch:-unknown}; performance measurements are invalid"
+  if java_properties="$(java -XshowSettings:properties -version 2>&1)"; then
+    java_version="$(printf '%s\n' "$java_properties" | sed -n 's/^[[:space:]]*java.version = //p' | sed -n '1p')"
+    java_arch="$(printf '%s\n' "$java_properties" | sed -n 's/^[[:space:]]*os.arch = //p' | sed -n '1p')"
+    java_vendor="$(printf '%s\n' "$java_properties" | sed -n 's/^[[:space:]]*java.vendor = //p' | sed -n '1p')"
+    if [ -n "$java_version" ] && [ -n "$java_arch" ]; then
+      pass 'JVM' "${java_vendor:-unknown} $java_version ($java_arch)"
+      if [ "$os_name" = Darwin ] && [ "$cpu_arch" = arm64 ] && [ "$java_arch" != aarch64 ] && [ "$java_arch" != arm64 ]; then
+        fail 'Native JVM architecture' "host is $cpu_arch but java reports $java_arch; performance measurements are invalid"
+      else
+        pass 'Native JVM architecture' "host/JVM architecture is suitable for comparison"
+      fi
+    else
+      fail 'JVM' 'java did not report java.version and os.arch properties'
+    fi
   else
-    pass 'Native JVM architecture' "host/JVM architecture is suitable for comparison"
+    fail 'JVM' 'java invocation failed'
   fi
 else
   fail 'JVM' 'java is not on PATH'
 fi
 
-if [ -r gradle/wrapper/gradle-wrapper.properties ]; then
-  wrapper_url="$(sed -n 's/^distributionUrl=//p' gradle/wrapper/gradle-wrapper.properties | sed -n '1p')"
-  pass 'Gradle wrapper' "${wrapper_url:-distribution URL not recorded}"
+wrapper_properties="${PREFLIGHT_GRADLE_WRAPPER_PROPERTIES:-gradle/wrapper/gradle-wrapper.properties}"
+if [ -r "$wrapper_properties" ]; then
+  wrapper_url="$(sed -n 's/^distributionUrl=//p' "$wrapper_properties" | sed -n '1p')"
+  wrapper_file="${wrapper_url##*/}"
+  case "$wrapper_file" in
+    gradle-*-bin.zip) gradle_version="${wrapper_file#gradle-}"; gradle_version="${gradle_version%-bin.zip}" ;;
+    gradle-*-all.zip) gradle_version="${wrapper_file#gradle-}"; gradle_version="${gradle_version%-all.zip}" ;;
+    *) gradle_version='' ;;
+  esac
+  if [ -n "$gradle_version" ]; then
+    pass 'Gradle wrapper' "version $gradle_version ($wrapper_file)"
+  else
+    fail 'Gradle wrapper' "distribution URL is blank or malformed in $wrapper_properties"
+  fi
 elif command -v gradle >/dev/null 2>&1; then
   note 'Gradle' "$(command_version gradle --version)"
 else

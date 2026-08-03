@@ -24,3 +24,10 @@
 ## Scope and concerns
 
 No renderer production code, dependencies, installed tools, or external repositories changed. The performance preflight remains intentionally failing until a native arm64 JVM, Xcode Metal tools, GLSLang/SPIR-V tooling, and the recorded runtime prerequisites are present. The full Gradle terminal did not print its usual completion line before the controller halted concurrent suites; XML evidence is clean, but a future owner may run it once in the settled toolchain environment if an explicit full-suite exit-code receipt is required.
+
+## Review-fix verification
+
+- The preflight now parses `gradle-<version>-bin.zip` or `gradle-<version>-all.zip` from `distributionUrl` and reports the version. A blank or malformed URL is `MISSING`, rather than a misleading pass.
+- A Java invocation must exit successfully and report both `java.version` and `os.arch`; otherwise it is `MISSING` and cannot yield ready status.
+- `scripts/tests/test_renderer_preflight.sh` now requires the current host's `--check` result to be `2`, and deterministically proves a ready Linux/toolchain fixture (`0`), a broken Java fixture (`2`), and malformed Gradle wrapper metadata (`2`).
+- Fresh command: `bash -n scripts/renderer-preflight.sh scripts/tests/test_renderer_preflight.sh && scripts/tests/test_renderer_preflight.sh` — exit `0`, `renderer-preflight shell tests: PASS`.

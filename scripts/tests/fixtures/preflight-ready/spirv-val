@@ -1,0 +1,2 @@
+#!/bin/sh
+printf 'SPIRV-Tools v2025.1\n'

@@ -1,0 +1,2 @@
+#!/bin/sh
+printf '    java.version = 17.0.13\n    java.vendor = Test Vendor\n    os.arch = x86_64\n' >&2
