@@ -1,0 +1,10 @@
+#!/bin/sh
+[ "${1:-}" = -C ] || exit 64
+[ -n "${2:-}" ] || exit 64
+shift 2
+case "$1 ${2:-}" in
+  'rev-parse --is-inside-work-tree') printf 'true\n' ;;
+  'rev-parse HEAD') printf '0123456789abcdef0123456789abcdef01234567\n' ;;
+  'status --porcelain') ;;
+  *) exit 64 ;;
+esac

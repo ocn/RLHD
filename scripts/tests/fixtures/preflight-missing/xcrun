@@ -1,2 +1,14 @@
 #!/bin/sh
-exit 1
+case "$1 $2" in
+  '-f metal') printf '/fixture/toolchain/usr/bin/metal\n'; exit 0 ;;
+  '-f metallib') printf '/fixture/toolchain/usr/bin/metallib\n'; exit 0 ;;
+  'metal --version')
+    if [ "${PREFLIGHT_FIXTURE_METAL_VERSION_OK:-0}" = 1 ]; then
+      printf 'Metal version fixture\n'
+      exit 0
+    fi
+    printf 'missing Metal Toolchain\n' >&2
+    exit 1 ;;
+  'metallib --version') printf 'missing Metal Toolchain\n' >&2; exit 72 ;;
+  *) exit 64 ;;
+esac

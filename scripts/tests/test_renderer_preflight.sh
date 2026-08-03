@@ -30,9 +30,16 @@ fixture_output="$(PATH="$fixture_bin:/bin" "$script" --check 2>&1)"
 fixture_status=$?
 set -e
 test "$fixture_status" -eq 2
-printf '%s\n' "$fixture_output" | grep -F 'MISSING  Metal compiler (xcrun metal/metallib): optional Xcode Metal toolchain is unavailable' >/dev/null
+printf '%s\n' "$fixture_output" | grep -F 'MISSING  Metal compiler (xcrun metal/metallib): tools must be discoverable and execute --version successfully' >/dev/null
 printf '%s\n' "$fixture_output" | grep -F 'MISSING  glslangValidator: GLSL-to-SPIR-V compiler is not on PATH' >/dev/null
 printf '%s\n' "$fixture_output" | grep -F 'MISSING  Native JVM architecture: host is arm64 but java reports x86_64; performance measurements are invalid' >/dev/null
+
+set +e
+metallib_execution_output="$(PREFLIGHT_FIXTURE_METAL_VERSION_OK=1 PATH="$fixture_bin:/bin" "$script" --check 2>&1)"
+metallib_execution_status=$?
+set -e
+test "$metallib_execution_status" -eq 2
+printf '%s\n' "$metallib_execution_output" | grep -F 'MISSING  Metal compiler (xcrun metal/metallib): tools must be discoverable and execute --version successfully' >/dev/null
 
 ready_fixture="$root/scripts/tests/fixtures/preflight-ready"
 set +e
@@ -51,6 +58,7 @@ relative_status=$?
 set -e
 test "$relative_status" -eq 0
 printf '%s\n' "$relative_output" | grep -F 'PASS  Gradle wrapper: version 8.10 (gradle-8.10-all.zip)' >/dev/null
+printf '%s\n' "$relative_output" | grep -F 'INFO  Git: 0123456789abcdef0123456789abcdef01234567 (clean)' >/dev/null
 printf '%s\n' "$relative_output" | grep -F 'READINESS: READY for local performance measurements' >/dev/null
 
 broken_java_fixture="$root/scripts/tests/fixtures/preflight-broken-java"
@@ -60,6 +68,15 @@ broken_java_status=$?
 set -e
 test "$broken_java_status" -eq 2
 printf '%s\n' "$broken_java_output" | grep -F 'MISSING  JVM: java invocation failed' >/dev/null
+
+java_8_fixture="$root/scripts/tests/fixtures/preflight-java-8"
+set +e
+java_8_output="$(PATH="$java_8_fixture:$ready_fixture:/bin" "$script" --check 2>&1)"
+java_8_status=$?
+set -e
+test "$java_8_status" -eq 2
+printf '%s\n' "$java_8_output" | grep -F 'PASS  JVM: Test Java 1.8.0_442 (x86_64)' >/dev/null
+printf '%s\n' "$java_8_output" | grep -F 'MISSING  Java version floor: Java 11 or newer is required; java reports 1.8.0_442' >/dev/null
 
 malformed_wrapper="$root/scripts/tests/fixtures/gradle-wrapper-malformed.properties"
 set +e

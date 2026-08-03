@@ -50,4 +50,12 @@ No renderer production code, dependencies, installed tools, or external reposito
 
 ## Evidence correction: Round 4
 
-- Corrected the Metal toolchain evidence: `xcrun -f metal` exits `0` and resolves the Xcode-default `metal` path, while `xcrun metal --version` exits `72` reporting a missing Metal Toolchain and `xcrun -f metallib` fails. The component download remains blocked: `xcodebuild -downloadComponent metalToolchain` exits `70` on the `IDESimulatorFoundation`/`DVTDownloads` symbol mismatch.
+- Corrected the Metal toolchain evidence: `xcrun -f metal` exits `0` and resolves the Xcode-default `metal` path; `xcrun metal --version` exits `1` reporting a missing Metal Toolchain; and `xcrun -f metallib` exits `72`. The component download remains blocked: `xcodebuild -downloadComponent metalToolchain` exits `70` on the `IDESimulatorFoundation`/`DVTDownloads` symbol mismatch.
+
+## Final-review fixes: Round 5
+
+- Corrected both Task 1 records to preserve the exact Metal command/status split: `xcrun -f metal` exits `0`, `xcrun metal --version` exits `1`, and `xcrun -f metallib` exits `72`.
+- Anchored every Git worktree, commit, and dirty-state probe to `repo_root` with `git -C`; the outside-CWD fixture requires `-C` and returns a deterministic commit and clean state.
+- Tightened macOS Metal readiness to require non-empty `metal` and `metallib` lookups plus successful `xcrun metal --version` and `xcrun metallib --version` execution. The Darwin fixture exposes both paths and covers a failing `metal` execution plus a variant that reaches a failing `metallib` execution; both strict runs exit `2`.
+- Added Java major-version parsing for legacy `1.x` and modern version strings and enforced Java 11 or newer. A successful, complete Java `1.8.0_442` fixture now produces `MISSING  Java version floor` and strict exit `2`.
+- Fresh verification: Bash syntax and the shell suite from repository root exit `0`; the suite from `scripts/tests` exits `0`; the explicit outside-CWD case exits `0` and reports the deterministic renderer Git inventory; live strict preflight with the temporary native JDK/Vulkan paths exits `2` with Metal as its only `MISSING` line; and `git diff --check` exits `0`.

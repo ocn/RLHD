@@ -42,6 +42,18 @@ if command -v java >/dev/null 2>&1; then
     java_vendor="$(printf '%s\n' "$java_properties" | sed -n 's/^[[:space:]]*java.vendor = //p' | sed -n '1p')"
     if [ -n "$java_version" ] && [ -n "$java_arch" ]; then
       pass 'JVM' "${java_vendor:-unknown} $java_version ($java_arch)"
+      case "$java_version" in
+        1.*) java_major="${java_version#1.}" ;;
+        *) java_major="$java_version" ;;
+      esac
+      java_major="${java_major%%[!0-9]*}"
+      if [ -n "$java_major" ] && [ "$java_major" -ge 11 ]; then
+        pass 'Java version floor' "Java $java_major satisfies the Java 11 minimum"
+      elif [ -n "$java_major" ]; then
+        fail 'Java version floor' "Java 11 or newer is required; java reports $java_version"
+      else
+        fail 'Java version floor' "could not parse a major version from java.version $java_version"
+      fi
       if [ "$os_name" = Darwin ] && [ "$cpu_arch" = arm64 ] && [ "$java_arch" != aarch64 ] && [ "$java_arch" != arm64 ]; then
         fail 'Native JVM architecture' "host is $cpu_arch but java reports $java_arch; performance measurements are invalid"
       else
@@ -92,10 +104,18 @@ if [ "$os_name" = Darwin ]; then
   else
     fail 'Xcode command-line tools' 'xcode-select has no active developer directory'
   fi
-  if command -v xcrun >/dev/null 2>&1 && xcrun -f metal >/dev/null 2>&1 && xcrun -f metallib >/dev/null 2>&1; then
-    pass 'Metal compiler' "$(xcrun -f metal)"
+  metal_path=''
+  metallib_path=''
+  if command -v xcrun >/dev/null 2>&1 &&
+    metal_path="$(xcrun -f metal 2>/dev/null)" &&
+    metallib_path="$(xcrun -f metallib 2>/dev/null)" &&
+    [ -n "$metal_path" ] && [ -n "$metallib_path" ] &&
+    xcrun metal --version >/dev/null 2>&1 &&
+    xcrun metallib --version >/dev/null 2>&1
+  then
+    pass 'Metal compiler' "$metal_path; metallib: $metallib_path"
   else
-    fail 'Metal compiler (xcrun metal/metallib)' 'optional Xcode Metal toolchain is unavailable'
+    fail 'Metal compiler (xcrun metal/metallib)' 'tools must be discoverable and execute --version successfully'
   fi
 else
   note 'Metal compiler' 'not applicable outside macOS'
@@ -128,10 +148,10 @@ else
   note 'MoltenVK' 'not applicable outside macOS'
 fi
 
-if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  commit="$(git rev-parse HEAD)"
+if command -v git >/dev/null 2>&1 && git -C "$repo_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  commit="$(git -C "$repo_root" rev-parse HEAD)"
   dirty="clean"
-  [ -n "$(git status --porcelain)" ] && dirty="dirty"
+  [ -n "$(git -C "$repo_root" status --porcelain)" ] && dirty="dirty"
   note 'Git' "$commit ($dirty)"
 else
   note 'Git' 'not a Git worktree or git unavailable'
