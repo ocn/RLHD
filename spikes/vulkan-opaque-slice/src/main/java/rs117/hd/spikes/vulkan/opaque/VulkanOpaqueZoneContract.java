@@ -75,7 +75,7 @@ public final class VulkanOpaqueZoneContract {
 	}
 
 	public static boolean isFrontFacing(float[] a, float[] b, float[] c) {
-		return signedArea2(a, b, c) < 0;
+		return signedArea2(a, b, c) > 0;
 	}
 
 	private static void validateRanges(List<PreparedDrawRange> ranges, int opaqueCount) {

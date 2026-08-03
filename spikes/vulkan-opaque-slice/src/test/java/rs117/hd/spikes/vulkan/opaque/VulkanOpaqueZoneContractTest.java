@@ -121,7 +121,9 @@ public class VulkanOpaqueZoneContractTest {
 		assertEquals(-2500f, VulkanOpaqueZoneContract.signedArea2(a, b, c), 0);
 		assertEquals("CLOCKWISE", VulkanOpaqueZoneContract.manifest().frontFace());
 		assertEquals("BACK", VulkanOpaqueZoneContract.manifest().cullMode());
-		assertTrue(VulkanOpaqueZoneContract.isFrontFacing(a, b, c));
+		assertFalse(VulkanOpaqueZoneContract.isFrontFacing(a, b, c));
+		assertEquals(2500f, VulkanOpaqueZoneContract.signedArea2(a, c, b), 0);
+		assertTrue(VulkanOpaqueZoneContract.isFrontFacing(a, c, b));
 	}
 
 	@Test

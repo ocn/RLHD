@@ -145,6 +145,7 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 
 	private final long[] counterValues = new long[VulkanControlCounters.FIELD_COUNT];
 	private final VulkanTimingLog timingLog;
+	private final VulkanCrashJournal crashJournal;
 	private final boolean validationRequested;
 	private final VulkanFailureInjector failureInjector;
 	private final long layerHandle;
@@ -181,15 +182,13 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 	private double timestampPeriodNs;
 	private boolean timestampsSupported;
 	private long generation;
+	private long lastHeartbeatNs;
+	private boolean firstPresentRecorded;
+	private VulkanCrashJournalException journalFailure;
 
 	LwjglVulkanBackend(long layerHandle, int initialWidth, int initialHeight, Path timingLog,
-		VulkanPresentMode requestedMode, boolean validationRequested)
-	{
-		this(layerHandle, initialWidth, initialHeight, timingLog, requestedMode, validationRequested, VulkanFailureInjector.NONE);
-	}
-
-	LwjglVulkanBackend(long layerHandle, int initialWidth, int initialHeight, Path timingLog,
-		VulkanPresentMode requestedMode, boolean validationRequested, VulkanFailureInjector failureInjector)
+		VulkanPresentMode requestedMode, boolean validationRequested, VulkanFailureInjector failureInjector,
+		VulkanCrashJournal crashJournal)
 	{
 		if (layerHandle == 0) throw new IllegalArgumentException("A borrowed CAMetalLayer handle is required.");
 		if (requestedMode == VulkanPresentMode.MAILBOX) throw new IllegalArgumentException("MAILBOX is not a requested mode.");
@@ -197,23 +196,32 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 		this.requestedMode = requestedMode;
 		this.validationRequested = validationRequested;
 		this.failureInjector = java.util.Objects.requireNonNull(failureInjector, "failureInjector");
+		this.crashJournal = java.util.Objects.requireNonNull(crashJournal, "crashJournal");
 		this.timingLog = new VulkanTimingLog(timingLog);
 		try
 		{
-			createLoader();
-			createInstance();
-			createSurface();
-			selectPhysicalDevice();
-			createDevice();
-			createCommandResources();
+			diagnosticStage("loader.create", VulkanCrashJournal.fields(), this::createLoader);
+			diagnosticStage("instance.create", VulkanCrashJournal.fields(), this::createInstance);
+			diagnosticStage("metal_surface.create", VulkanCrashJournal.fields(), this::createSurface);
+			diagnosticStage("physical_device.select", VulkanCrashJournal.fields(), this::selectPhysicalDevice);
+			diagnosticStage("device.create", VulkanCrashJournal.fields(), this::createDevice);
+			diagnosticStage("command_resources.create", VulkanCrashJournal.fields(), this::createCommandResources);
 			if (initialWidth <= 0 || initialHeight <= 0) throw new IllegalArgumentException("Initial Vulkan extent must be positive.");
-			createSwapchain(initialWidth, initialHeight);
+			diagnosticStage("swapchain.create", VulkanCrashJournal.fields("width", initialWidth, "height", initialHeight),
+				() -> createSwapchain(initialWidth, initialHeight));
 			ready = true;
+			crashJournal.heartbeat("backend.ready", VulkanCrashJournal.fields("physical_device", physicalDeviceName));
 		}
 		catch (RuntimeException | Error ex)
 		{
 			counterValues[COUNTER_INIT_ERRORS]++;
 			initializationError = ex.getMessage() == null ? ex.getClass().getSimpleName() : ex.getMessage();
+			try
+			{
+				crashJournal.heartbeat("backend.init_failed", VulkanCrashJournal.fields(
+					"error_type", ex.getClass().getName(), "error_message", ex.getMessage()));
+			}
+			catch (VulkanCrashJournalException journalEx) { ex.addSuppressed(journalEx); }
 		}
 	}
 
@@ -236,7 +244,13 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 		{
 			try
 			{
-				recreateSwapchain(width, height);
+				diagnosticStage("swapchain.recreate", VulkanCrashJournal.fields("width", width, "height", height),
+					() -> recreateSwapchain(width, height));
+			}
+			catch (VulkanCrashJournalException ex)
+			{
+				rememberJournalFailure(ex);
+				throw ex;
 			}
 			catch (RuntimeException | Error ex)
 			{
@@ -314,6 +328,11 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 			long inFlight = counterValues[COUNTER_SUBMITTED] - counterValues[COUNTER_COMPLETED];
 			counterValues[COUNTER_MAX_IN_FLIGHT] = Math.max(counterValues[COUNTER_MAX_IN_FLIGHT], inFlight);
 			int present;
+			String firstPresentTransition = null;
+			if (!firstPresentRecorded)
+				firstPresentTransition = crashJournal.intent("first_present.enqueue", VulkanCrashJournal.fields(
+					"frame_id", frameId, "image_index", imageIndex, "width", swapchain.width, "height", swapchain.height,
+					"requested_mode", requestedMode.logName(), "effective_mode", effectiveMode.logName()));
 			try (MemoryStack stack = MemoryStack.stackPush())
 			{
 				VkSwapchainPresentFenceInfoEXT presentFence = VkSwapchainPresentFenceInfoEXT.calloc(stack).sType$Default()
@@ -323,11 +342,47 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 					.swapchainCount(1).pSwapchains(stack.longs(swapchain.handle)).pImageIndices(stack.ints(imageIndex));
 				present = KHRSwapchain.vkQueuePresentKHR(presentQueue, info);
 			}
+			if (firstPresentTransition != null && (present == VK_SUCCESS || present == VK_SUBOPTIMAL_KHR))
+			{
+				crashJournal.completed("first_present.enqueue", firstPresentTransition,
+					VulkanCrashJournal.fields("frame_id", frameId, "result", present, "status", "queued-not-displayed"));
+				firstPresentRecorded = true;
+			}
+			else if (firstPresentTransition != null)
+				crashJournal.failed("first_present.enqueue", firstPresentTransition, failure("vkQueuePresentKHR", present));
 			if (presentationWasEnqueued(present)) swapchain.presentFenceLive[imageIndex] = true;
 			if (present == VK_ERROR_OUT_OF_DATE_KHR || present == VK_SUBOPTIMAL_KHR) recreatePending = true;
 			else if (present != VK_SUCCESS) throw failure("vkQueuePresentKHR", present);
 			frameCursor = (frameCursor + 1) % FRAME_COUNT;
+			long now = System.nanoTime();
+			if (lastHeartbeatNs == 0 || now - lastHeartbeatNs >= 1_000_000_000L)
+			{
+				try
+				{
+					crashJournal.heartbeat("steady_present", VulkanCrashJournal.fields(
+						"frame_id", frameId, "submitted", counterValues[COUNTER_SUBMITTED],
+						"completed", counterValues[COUNTER_COMPLETED], "present_result", present,
+						"width", swapchain.width, "height", swapchain.height,
+						"requested_mode", requestedMode.logName(), "effective_mode", effectiveMode.logName()));
+				}
+				catch (VulkanCrashJournalException ex)
+				{
+					rememberJournalFailure(ex);
+				}
+				lastHeartbeatNs = now;
+			}
 			return VulkanFrameOutcome.SUBMITTED;
+		}
+		catch (VulkanCrashJournalException ex)
+		{
+			if (!submitted)
+			{
+				try { consumeAndReleaseAcquiredImage(frame, imageIndex, frameFenceReset); }
+				catch (RuntimeException | Error cleanup) { ex.addSuppressed(cleanup); }
+			}
+			else if (frame.pending != null) frame.pending.error = "crash-journal-error";
+			rememberJournalFailure(ex);
+			throw ex;
 		}
 		catch (RuntimeException | Error ex)
 		{
@@ -414,10 +469,14 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 		{
 			try
 			{
-				finishAllFrames();
-				waitForPresentRetirement(swapchain);
-				destroySwapchain();
+				diagnosticStage("swapchain.suspend", VulkanCrashJournal.fields("frame_id", frameId), () ->
+				{
+					finishAllFrames();
+					waitForPresentRetirement(swapchain);
+					destroySwapchain();
+				});
 			}
+			catch (VulkanCrashJournalException ex) { rememberJournalFailure(ex); throw ex; }
 			catch (RuntimeException | Error ex)
 			{
 				counterValues[COUNTER_COMMAND_ERRORS]++;
@@ -464,6 +523,9 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 		accepting = false;
 		consumed = true;
 		Throwable failure = null;
+		String[] closeTransition = new String[1];
+		failure = cleanup(failure, () -> closeTransition[0] = crashJournal.intent("backend.close", VulkanCrashJournal.fields(
+			"submitted", counterValues[COUNTER_SUBMITTED], "completed", counterValues[COUNTER_COMPLETED])));
 		failure = cleanup(failure, () -> failureInjector.check("close-after-consumption"));
 		failure = cleanup(failure, this::finishAllFrames);
 		failure = cleanup(failure, () -> waitForPresentRetirement(swapchain));
@@ -518,8 +580,39 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 		failure = cleanup(failure, () -> timingLog.runEnd(requestedMode, effectiveMode, counterValues, runError));
 		failure = cleanup(failure, timingLog::close);
 		System.arraycopy(counterValues, 0, finalCounters, 0, counterValues.length);
+		boolean teardownError = failure != null;
+		if (closeTransition[0] != null)
+			failure = cleanup(failure, () -> crashJournal.completed("backend.close", closeTransition[0], VulkanCrashJournal.fields(
+				"live_native_objects", counterValues[COUNTER_LIVE_NATIVE_OBJECTS], "teardown_error", teardownError)));
 		if (failure != null) throw new VulkanBackendCloseException("Vulkan teardown failed after backend ownership was consumed.",
 			failure, true);
+	}
+
+	private void diagnosticStage(String stage, java.util.Map<String, ?> details, Runnable action)
+	{
+		String transition = crashJournal.intent(stage, details);
+		try
+		{
+			action.run();
+			crashJournal.completed(stage, transition, details);
+		}
+		catch (VulkanCrashJournalException ex)
+		{
+			throw ex;
+		}
+		catch (RuntimeException | Error ex)
+		{
+			try { crashJournal.failed(stage, transition, ex); }
+			catch (VulkanCrashJournalException journalEx) { ex.addSuppressed(journalEx); }
+			throw ex;
+		}
+	}
+
+	private void rememberJournalFailure(VulkanCrashJournalException failure)
+	{
+		if (journalFailure == null) journalFailure = failure;
+		accepting = false;
+		if (initializationError == null) initializationError = "crash-journal-error";
 	}
 
 	private static Throwable cleanup(Throwable failure, Runnable action)
@@ -1795,6 +1888,7 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 
 	private void ensureAccepting()
 	{
+		if (journalFailure != null) throw journalFailure;
 		if (!accepting || consumed) throw new IllegalStateException("Vulkan control renderer is not running.");
 	}
 

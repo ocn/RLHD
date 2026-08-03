@@ -130,8 +130,8 @@ results. The Vulkan surface handle exists only between the platform adapter and 
 ## Task 2: Render one opaque static zone through Vulkan
 
 Task 2 is split because the current macOS host has repeatedly panicked in WindowServer/DCP presentation. Task 2A is
-CPU/offline only and cannot establish renderer correctness. Task 2B is the original live acceptance gate and remains
-`NOT RUN` until a safe host or display topology is available. Full Task 2 completion requires both parts.
+CPU/offline only and cannot establish renderer correctness. Task 2B's surface-free rung has now run; every WSI and
+presentation rung remains `NOT RUN`. Full Task 2 completion requires both parts.
 
 ### Task 2A: Lock the opaque-zone contract offline
 
@@ -155,12 +155,12 @@ CPU/offline only and cannot establish renderer correctness. Task 2B is the origi
 - Test: `spikes/vulkan-opaque-slice/src/test/java/rs117/hd/spikes/vulkan/opaque/VulkanOpaqueZoneContractTest.java`
 - Modify: `build.gradle`
 
-- [ ] Write failing tests for immutable frame/UI snapshots, generation-safe zone identity, upload replacement/destroy semantics, unknown-zone rejection, zero-extent suspension, partial-upload rollback, aggregated teardown, and resource-ledger underflow.
-- [ ] Define the opaque vertex binding as one 28-byte record: signed-short position at offset 0, half-float UVW at 8, signed-short normal at 16, and signed face reference at 24. Serialize vertex and 36-byte face records little-endian and validate opaque counts, triangle-aligned ranges, face-reference bounds, reversed winding, and Task 1 BASE material associations.
-- [ ] Define a 72-byte vertex push range (`mat4 clipFromWorld` at 0 and `ivec2 sceneBase` at 64), reverse-Z depth (`D32_SFLOAT`, clear 0, `GREATER_OR_EQUAL`), negative-height dynamic viewport, BGRA8 sRGB-nonlinear color, and premultiplied UI composition as a pure manifest with CPU projection/depth/winding tests.
-- [ ] Compile and validate all four real shaders offline for Vulkan 1.2. Generate deterministic JSON reflection and fail on interface drift: opaque locations 0-3, scalar metadata `ArrayStride=4` at set 0/binding 0, push offsets/size, fragment output, and UI sampler set 0/binding 0. Java tests separately pin formats, offsets, stages, and pipeline state not represented by reflection.
-- [ ] Keep Vulkan-specific classes, SPIR-V, reflection JSON, LWJGL, and native dependencies out of the production JAR/runtime. Task 2A must never load a Vulkan loader, enumerate a device, create a native layer/surface/swapchain, submit, present, or open a window.
-- [ ] Independently review and commit Task 2A as partial progress only. Record every physical-device, MoltenVK pipeline, clipping/interpolation/culling, gamma/orientation, UI blend, validation, readback, acquire/submit/present, and resource-retirement claim as `NOT RUN`.
+- [x] Write failing tests for immutable frame/UI snapshots, generation-safe zone identity, upload replacement/destroy semantics, unknown-zone rejection, zero-extent suspension, partial-upload rollback, aggregated teardown, and resource-ledger underflow.
+- [x] Define the opaque vertex binding as one 28-byte record: signed-short position at offset 0, half-float UVW at 8, signed-short normal at 16, and signed face reference at 24. Serialize vertex and 36-byte face records little-endian and validate opaque counts, triangle-aligned ranges, face-reference bounds, reversed winding, and Task 1 BASE material associations.
+- [x] Define a 72-byte vertex push range (`mat4 clipFromWorld` at 0 and `ivec2 sceneBase` at 64), reverse-Z depth (`D32_SFLOAT`, clear 0, `GREATER_OR_EQUAL`), negative-height dynamic viewport, BGRA8 sRGB-nonlinear color, and premultiplied UI composition as a pure manifest with CPU projection/depth/winding tests.
+- [x] Compile and validate all four real shaders offline for Vulkan 1.2. Generate deterministic JSON reflection and fail on interface drift: opaque locations 0-3, scalar metadata `ArrayStride=4` at set 0/binding 0, push offsets/size, fragment output, and UI sampler set 0/binding 0. Java tests separately pin formats, offsets, stages, and pipeline state not represented by reflection.
+- [x] Keep Vulkan-specific classes, SPIR-V, reflection JSON, LWJGL, and native dependencies out of the production JAR/runtime. Task 2A must never load a Vulkan loader, enumerate a device, create a native layer/surface/swapchain, submit, present, or open a window.
+- [x] Independently review and commit Task 2A as partial progress only. At that checkpoint, record every physical-device, MoltenVK pipeline, clipping/interpolation/culling, gamma/orientation, UI blend, validation, readback, acquire/submit/present, and resource-retirement claim as `NOT RUN`; later live evidence is recorded separately below.
 
 ### Task 2B: Execute the live opaque-zone slice safely
 
@@ -170,12 +170,18 @@ CPU/offline only and cannot establish renderer correctness. Task 2B is the origi
 - Create: `src/main/java/rs117/hd/renderer/vulkan/VulkanZoneResources.java`
 - Create: `src/main/java/rs117/hd/renderer/vulkan/VulkanSurfaceProvider.java`
 - Test: `src/test/java/rs117/hd/renderer/vulkan/VulkanOpaqueZoneIntegrationTest.java`
+- Maintain: `docs/renderer/panic-investigation-log.md`
+- Append automatically: `docs/renderer/panic-investigation-runs.jsonl`
 
+- [x] Establish a sparse, storage-forced safety journal with intent/completion records for lifecycle transitions and timing-log selection, a one-second presentation heartbeat, an append-only incident ledger, and a fail-closed one-variable risk ladder. Live Gradle runs require exactly one rung; resize/suspend/restore, unlocked mode, and fullscreen cannot be combined. A missing terminal record is evidence of an incomplete JVM run, not proof of a renderer-caused panic.
 - [ ] Approve a numeric golden-image tolerance in `shader-correctness-plan.md` and identify a safe live-test host/topology.
 - [ ] Write a failing integration test that uploads Task 1's fixed geometry, renders one top-level opaque zone plus the exact UI texture, and compares GPU readback with that approved golden/tolerance.
 - [ ] Move only the reviewed Task 4 loader/device/surface/swapchain/synchronization/resource-lifetime mechanisms required by this path behind `SurfaceProvider` and `RendererBackend`; retain failure-injection tests.
 - [ ] Implement staging uploads, one opaque pipeline, depth, viewport/camera push data, UI composition, offscreen readback, and presentation. Exclude alpha, textures/material effects, dynamic models, shadows, lighting, water, and post-processing.
+- Surface-free implementation checkpoint: device/queue selection, resource allocation, opaque/depth/UI pipelines, row-stride-aware UI upload, queue submission, host readback, and tracked teardown compile in the isolated `vulkanOffscreenSlice` source set. Presentation and non-macOS GPU execution remain unverified and separate.
+- Live checkpoint `R-20260803-007`: the normalized offscreen opaque/UI/readback test passed on Apple M3 Ultra through MoltenVK 1.4.2 with the Khronos validation layer enabled, zero validation warnings/errors from instance creation through destruction, and balanced app-tracked handles after close. Presentation, the full Task 1 fixture/golden, production backend wiring, and non-macOS GPU execution remain unverified.
 - [ ] Run with validation enabled; require zero warnings/errors, golden/readback acceptance, balanced acquire/submit/present counters, and zero app-tracked live objects after close.
+- [ ] Execute the live path in order: offscreen readback; layer attachment; surface/swapchain creation; first FIFO present; sustained windowed FIFO; resize/suspend/restore; unlocked mode; fullscreen; display migration. Review the journal and timing log before advancing one rung.
 
 ## Task 3: Add opt-in selection and safe fallback
 

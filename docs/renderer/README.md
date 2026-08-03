@@ -13,5 +13,7 @@ Review in this order:
 7. [Packaging/release plan](packaging-release-plan.md) — native policy, CI, artifacts, rollout, and rollback.
 8. [Benchmark protocol](benchmark-protocol.md) — identical-scene, lifecycle, and long-duration measurements.
 9. [Toolchain preflight](toolchain-preflight.md) and [binding compatibility](binding-compatibility.md) — reproducible local prerequisites.
+10. [Panic investigation log](panic-investigation-log.md) — append-only incidents, durable pre-panic checkpoints, and the staged live-test risk ladder.
+11. [Vulkan vertical-slice results](vertical-slice-results.md) — bounded surface-free GPU evidence and explicit unverified claims.
 
 Task 2/3/4 controls live under `spikes/`. Their results are bounded technical evidence; they do not imply Jagex, RuneLite, Plugin Hub, or maintainer acceptance.

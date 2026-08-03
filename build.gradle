@@ -70,6 +70,16 @@ sourceSets {
 		compileClasspath += sourceSets.main.output + sourceSets.vulkanOpaqueSlice.output
 		runtimeClasspath += output + compileClasspath + sourceSets.vulkanOpaqueSlice.runtimeClasspath
 	}
+	vulkanOffscreenSlice {
+		java.srcDir 'spikes/vulkan-offscreen-slice/src/main/java'
+		compileClasspath += sourceSets.main.output + sourceSets.vulkanOpaqueSlice.output
+		runtimeClasspath += output + sourceSets.main.output + sourceSets.vulkanOpaqueSlice.output + compileClasspath
+	}
+	vulkanOffscreenSliceTest {
+		java.srcDir 'spikes/vulkan-offscreen-slice/src/test/java'
+		compileClasspath += sourceSets.main.output + sourceSets.vulkanOpaqueSlice.output + sourceSets.vulkanOffscreenSlice.output
+		runtimeClasspath += output + compileClasspath + sourceSets.vulkanOffscreenSlice.runtimeClasspath
+	}
 }
 
 configurations {
@@ -78,6 +88,7 @@ configurations {
 	metalControlSpikeTestImplementation.extendsFrom metalControlSpikeImplementation
 	vulkanControlSpikeTestImplementation.extendsFrom vulkanControlSpikeImplementation
 	vulkanOpaqueSliceTestImplementation.extendsFrom testImplementation
+	vulkanOffscreenSliceTestImplementation.extendsFrom vulkanOffscreenSliceImplementation
 }
 
 dependencies.add('metalControlSpikeImplementation', 'com.google.code.gson:gson:2.14.0')
@@ -95,6 +106,17 @@ dependencies.add('vulkanOpaqueSliceImplementation', 'com.google.code.gson:gson:2
 dependencies.add('vulkanOpaqueSliceTestImplementation', 'com.google.code.gson:gson:2.14.0') {
 	transitive = false
 }
+dependencies.add('vulkanOffscreenSliceImplementation', 'org.lwjgl:lwjgl:3.3.2')
+dependencies.add('vulkanOffscreenSliceImplementation', 'org.lwjgl:lwjgl-vulkan:3.3.2')
+dependencies.add('vulkanOffscreenSliceTestImplementation', 'junit:junit:4.13.2')
+
+def hostOs = System.getProperty('os.name').toLowerCase(java.util.Locale.ROOT)
+def hostArch = System.getProperty('os.arch').toLowerCase(java.util.Locale.ROOT)
+def vulkanOffscreenNativeClassifier = hostOs.contains('mac') ?
+	(hostArch in ['aarch64', 'arm64'] ? 'natives-macos-arm64' : 'natives-macos') :
+	hostOs.contains('win') ? (hostArch in ['aarch64', 'arm64'] ? 'natives-windows-arm64' : 'natives-windows') :
+	(hostArch in ['aarch64', 'arm64'] ? 'natives-linux-arm64' : 'natives-linux')
+dependencies.add('vulkanOffscreenSliceRuntimeOnly', "org.lwjgl:lwjgl:3.3.2:${vulkanOffscreenNativeClassifier}")
 
 def macSurfaceSpikeDir = file('spikes/macos-surface')
 def macSurfaceNativeDir = layout.buildDirectory.dir('spikes/macos-surface/native')
@@ -110,6 +132,9 @@ def vulkanOpaqueSliceDir = file('spikes/vulkan-opaque-slice')
 def vulkanOpaqueSliceOutputDir = layout.buildDirectory.dir('generated/spikes/vulkan-opaque-slice/resources')
 def vulkanOpaqueSliceShaderNames = ['opaque.vert', 'opaque.frag', 'ui.vert', 'ui.frag']
 def rendererHeadfulAcknowledgement = 'I_ACCEPT_KERNEL_PANIC_RISK'
+def vulkanLiveRiskLevels = ['surface-swapchain', 'first-fifo-present', 'sustained-fifo',
+	'resize-suspend-restore', 'unlocked-present', 'fullscreen']
+def rendererCrashJournalFile = layout.projectDirectory.file('docs/renderer/panic-investigation-runs.jsonl')
 def requireRendererHeadfulAcknowledgement = { task ->
 	def supplied = providers.gradleProperty('rendererHeadfulAcknowledgement').orNull
 	if (supplied != rendererHeadfulAcknowledgement) {
@@ -117,6 +142,15 @@ def requireRendererHeadfulAcknowledgement = { task ->
 			"Run CPU-only checks instead. To override after reviewing the host risk, pass " +
 			"-PrendererHeadfulAcknowledgement=${rendererHeadfulAcknowledgement}.")
 	}
+}
+def requireVulkanLiveRiskLevel = { task ->
+	def supplied = providers.gradleProperty('vulkanLiveRiskLevel').orNull
+	if (!vulkanLiveRiskLevels.contains(supplied)) {
+		throw new GradleException("${task.path} requires exactly one Vulkan live risk rung via " +
+			"-PvulkanLiveRiskLevel=<${vulkanLiveRiskLevels.join('|')}>. No rung is selected by default.")
+	}
+	task.systemProperty 'rlhd.spike.vulkan.riskLevel', supplied
+	task.systemProperty 'rlhd.spike.vulkan.validation', 'true'
 }
 
 sourceSets.vulkanControlSpike.resources.srcDir(vulkanControlShaderOutputDir)
@@ -451,6 +485,33 @@ tasks.register('vulkanOpaqueSliceCheck') {
 		tasks.named('vulkanOpaqueSliceDependencyIsolation'), tasks.named('vulkanOpaqueSliceJar')
 }
 
+tasks.register('vulkanOffscreenSliceTest', Test) {
+	group = 'verification'
+	description = 'Runs CPU/static tests for the surface-free Vulkan device foundation.'
+	dependsOn tasks.named(sourceSets.vulkanOffscreenSlice.classesTaskName)
+	testClassesDirs = sourceSets.vulkanOffscreenSliceTest.output.classesDirs
+	classpath = sourceSets.vulkanOffscreenSliceTest.runtimeClasspath
+	exclude '**/*IntegrationTest.class'
+}
+
+tasks.register('vulkanOffscreenIntegrationTest', Test) {
+	group = 'verification'
+	description = 'Runs the explicitly acknowledged surface-free Vulkan GPU readback slice; no window or presentation APIs are used.'
+	dependsOn tasks.named(sourceSets.vulkanOffscreenSlice.classesTaskName)
+	testClassesDirs = sourceSets.vulkanOffscreenSliceTest.output.classesDirs
+	classpath = sourceSets.vulkanOffscreenSliceTest.runtimeClasspath
+	include '**/*OffscreenIntegrationTest.class'
+	systemProperty 'rlhd.spike.vulkan.offscreen.integration', 'true'
+	systemProperty 'rlhd.spike.vulkan.validation', 'true'
+	def configuredVulkanLoader = providers.systemProperty('rlhd.spike.vulkan.loader')
+		.orElse(providers.environmentVariable('RLHD_VULKAN_LOADER')).orNull
+	if (configuredVulkanLoader) systemProperty 'rlhd.spike.vulkan.loader', configuredVulkanLoader
+	doFirst {
+		if (providers.gradleProperty('vulkanOffscreenAcknowledgement').orNull != 'I_ACCEPT_OFFSCREEN_GPU_WORK')
+			throw new GradleException('vulkanOffscreenIntegrationTest requires -PvulkanOffscreenAcknowledgement=I_ACCEPT_OFFSCREEN_GPU_WORK')
+	}
+}
+
 tasks.register('vulkanControlSpikeTest', Test) {
 	group = 'verification'
 	description = 'Runs deterministic pure tests for the opt-in Vulkan/MoltenVK control spike.'
@@ -461,36 +522,54 @@ tasks.register('vulkanControlSpikeTest', Test) {
 
 tasks.register('vulkanControlIntegrationTest', Test) {
 	group = 'verification'
-	description = 'Runs the opt-in headful Vulkan/MoltenVK control smoke, readback, recreation, and teardown test.'
+	description = 'Runs one explicitly selected headful Vulkan/MoltenVK risk rung with readback and teardown checks.'
 	dependsOn tasks.named('buildMacSurfaceNative'), tasks.named(sourceSets.vulkanControlSpike.classesTaskName)
 	testClassesDirs = sourceSets.vulkanControlSpikeTest.output.classesDirs
 	classpath = sourceSets.vulkanControlSpikeTest.runtimeClasspath
 	include '**/*IntegrationTest.class'
 	systemProperty 'java.awt.headless', 'false'
 	systemProperty 'rlhd.spike.vulkan.integration', 'true'
+	systemProperty 'rlhd.spike.vulkan.crashJournal', rendererCrashJournalFile.asFile.absolutePath
+	systemProperty 'rlhd.spike.gradleTask', 'vulkanControlIntegrationTest'
 	systemProperty 'rlhd.spike.macos.library', macSurfaceNativeLibrary.get().asFile.absolutePath
 	def configuredVulkanLoader = providers.systemProperty('rlhd.spike.vulkan.loader')
 		.orElse(providers.environmentVariable('RLHD_VULKAN_LOADER')).orNull
 	if (configuredVulkanLoader) {
 		systemProperty 'rlhd.spike.vulkan.loader', configuredVulkanLoader
 	}
-	doFirst { task -> requireRendererHeadfulAcknowledgement(task) }
+	doFirst { task ->
+		requireRendererHeadfulAcknowledgement(task)
+		requireVulkanLiveRiskLevel(task)
+		def commit = providers.exec { commandLine 'git', 'rev-parse', 'HEAD' }.standardOutput.asText.get().trim()
+		def dirty = !providers.exec { commandLine 'git', 'status', '--porcelain' }.standardOutput.asText.get().trim().isEmpty()
+		task.systemProperty 'rlhd.spike.gitCommit', commit
+		task.systemProperty 'rlhd.spike.gitDirty', dirty
+	}
 }
 
 tasks.register('runVulkanControlSpike', JavaExec) {
 	group = 'application'
-	description = 'Runs the disposable Vulkan/MoltenVK AWT control program.'
+	description = 'Runs exactly one explicitly selected risk rung in the disposable Vulkan/MoltenVK AWT control.'
 	dependsOn tasks.named('buildMacSurfaceNative'), tasks.named(sourceSets.vulkanControlSpike.classesTaskName)
 	classpath = sourceSets.vulkanControlSpike.runtimeClasspath
 	mainClass = 'rs117.hd.spikes.vulkan.control.VulkanControlDemo'
 	systemProperty 'java.awt.headless', 'false'
 	systemProperty 'rlhd.spike.macos.library', macSurfaceNativeLibrary.get().asFile.absolutePath
+	systemProperty 'rlhd.spike.vulkan.crashJournal', rendererCrashJournalFile.asFile.absolutePath
+	systemProperty 'rlhd.spike.gradleTask', 'runVulkanControlSpike'
 	def configuredVulkanLoader = providers.systemProperty('rlhd.spike.vulkan.loader')
 		.orElse(providers.environmentVariable('RLHD_VULKAN_LOADER')).orNull
 	if (configuredVulkanLoader) {
 		systemProperty 'rlhd.spike.vulkan.loader', configuredVulkanLoader
 	}
-	doFirst { task -> requireRendererHeadfulAcknowledgement(task) }
+	doFirst { task ->
+		requireRendererHeadfulAcknowledgement(task)
+		requireVulkanLiveRiskLevel(task)
+		def commit = providers.exec { commandLine 'git', 'rev-parse', 'HEAD' }.standardOutput.asText.get().trim()
+		def dirty = !providers.exec { commandLine 'git', 'status', '--porcelain' }.standardOutput.asText.get().trim().isEmpty()
+		task.systemProperty 'rlhd.spike.gitCommit', commit
+		task.systemProperty 'rlhd.spike.gitDirty', dirty
+	}
 }
 
 tasks.register('vulkanControlSpikeJar', Jar) {

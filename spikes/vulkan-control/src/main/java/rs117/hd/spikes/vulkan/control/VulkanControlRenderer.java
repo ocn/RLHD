@@ -17,14 +17,10 @@ public final class VulkanControlRenderer implements AutoCloseable
 	private int uiWidth;
 	private int uiHeight;
 
-	public VulkanControlRenderer(MacMetalSurface surface, Path timingLog, VulkanPresentMode presentMode, boolean validationRequested)
+	VulkanControlRenderer(MacMetalSurface surface, Path timingLog, VulkanPresentMode presentMode,
+		boolean validationRequested, VulkanCrashJournal crashJournal)
 	{
-		this(createBackend(surface, timingLog, presentMode, validationRequested), timingLog);
-	}
-
-	public VulkanControlRenderer(MacMetalSurface surface, Path timingLog, VulkanPresentMode presentMode)
-	{
-		this(surface, timingLog, presentMode, Boolean.parseBoolean(System.getProperty("rlhd.spike.vulkan.validation", "false")));
+		this(createBackend(surface, timingLog, presentMode, validationRequested, crashJournal), timingLog);
 	}
 
 	VulkanControlRenderer(VulkanBackendAccess backend, Path timingLog)
@@ -124,7 +120,7 @@ public final class VulkanControlRenderer implements AutoCloseable
 	}
 
 	private static VulkanBackendAccess createBackend(MacMetalSurface surface, Path timingLog,
-		VulkanPresentMode presentMode, boolean validationRequested)
+		VulkanPresentMode presentMode, boolean validationRequested, VulkanCrashJournal crashJournal)
 	{
 		MacMetalSurface checkedSurface = Objects.requireNonNull(surface, "surface");
 		SurfaceExtent extent = checkedSurface.extent();
@@ -132,6 +128,7 @@ public final class VulkanControlRenderer implements AutoCloseable
 		int width = Math.toIntExact(Math.round(extent.pixelWidth()));
 		int height = Math.toIntExact(Math.round(extent.pixelHeight()));
 		return new LwjglVulkanBackend(checkedSurface.metalLayerHandle(), width, height,
-			Objects.requireNonNull(timingLog, "timingLog"), Objects.requireNonNull(presentMode, "presentMode"), validationRequested);
+			Objects.requireNonNull(timingLog, "timingLog"), Objects.requireNonNull(presentMode, "presentMode"),
+			validationRequested, VulkanFailureInjector.NONE, Objects.requireNonNull(crashJournal, "crashJournal"));
 	}
 }
