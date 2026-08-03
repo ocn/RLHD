@@ -8,6 +8,7 @@ import java.awt.geom.AffineTransform;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.function.BooleanSupplier;
 import org.junit.Assume;
 import org.junit.Test;
 import rs117.hd.spikes.macos.MacMetalSurface;
@@ -114,6 +115,7 @@ public class MetalControlIntegrationTest
 
 			assertRetainedLayerSafety(surface, canvas);
 			assertFailureSeams(surface);
+			assertStalePrefetchInvalidation(surface, canvas);
 		}
 		finally
 		{
@@ -205,6 +207,102 @@ public class MetalControlIntegrationTest
 		assertFalse(bypassUpload.runReadbackCheck());
 		bypassUpload.close();
 		TimingJsonSchema.validateLog(Files.readAllLines(bypassUploadLog));
+	}
+
+	private static void assertStalePrefetchInvalidation(MacMetalSurface surface, Canvas canvas) throws Exception
+	{
+		assertReadyPrefetchInvalidatedByResize(surface, canvas);
+		assertReadyPrefetchInvalidatedBySuspend(surface, canvas);
+		assertPendingPrefetchInvalidatedByResize(surface, canvas);
+		assertPendingPrefetchInvalidatedBySuspend(surface, canvas);
+	}
+
+	private static void assertReadyPrefetchInvalidatedByResize(MacMetalSurface surface, Canvas canvas) throws Exception
+	{
+		Path log = Files.createTempFile("rlhd-metal-ready-resize-", ".jsonl");
+		MetalControlRenderer renderer = renderer(surface, log, PresentMode.FIFO_LIKE, "");
+		primeReadyPrefetch(renderer, surface, 5000);
+		surface.resize(277, 191, scale(canvas));
+		assertEquals(FrameOutcome.SKIPPED_IN_FLIGHT, renderer.render(surface.extent(), 5100));
+		renderer.close();
+		assertEquals(0, renderer.counters().liveNativeObjects());
+		TimingJsonSchema.validateLog(Files.readAllLines(log));
+		resize(surface, canvas.getWidth(), canvas.getHeight(), canvas);
+	}
+
+	private static void assertReadyPrefetchInvalidatedBySuspend(MacMetalSurface surface, Canvas canvas) throws Exception
+	{
+		Path log = Files.createTempFile("rlhd-metal-ready-suspend-", ".jsonl");
+		MetalControlRenderer renderer = renderer(surface, log, PresentMode.FIFO_LIKE, "");
+		primeReadyPrefetch(renderer, surface, 5200);
+		surface.resize(0, 0, scale(canvas));
+		assertEquals(FrameOutcome.SKIPPED_SUSPENDED, renderer.render(surface.extent(), 5300));
+		resize(surface, canvas.getWidth(), canvas.getHeight(), canvas);
+		assertEquals(FrameOutcome.SKIPPED_IN_FLIGHT, renderer.render(surface.extent(), 5301));
+		renderer.close();
+		assertEquals(0, renderer.counters().liveNativeObjects());
+		TimingJsonSchema.validateLog(Files.readAllLines(log));
+	}
+
+	private static void assertPendingPrefetchInvalidatedByResize(MacMetalSurface surface, Canvas canvas) throws Exception
+	{
+		Path log = Files.createTempFile("rlhd-metal-pending-resize-", ".jsonl");
+		MetalControlRenderer renderer = renderer(surface, log, PresentMode.FIFO_LIKE, "stalled-drawable");
+		assertEquals(FrameOutcome.SKIPPED_IN_FLIGHT, renderer.render(surface.extent(), 5400));
+		surface.resize(293, 207, scale(canvas));
+		assertEquals(FrameOutcome.SKIPPED_IN_FLIGHT, renderer.render(surface.extent(), 5401));
+		await("pending resize acquisition", () -> acquisitionsDrained(renderer));
+		assertEquals(0, renderer.counters().nilDrawable());
+		renderer.close();
+		assertEquals(0, renderer.counters().liveNativeObjects());
+		TimingJsonSchema.validateLog(Files.readAllLines(log));
+		resize(surface, canvas.getWidth(), canvas.getHeight(), canvas);
+	}
+
+	private static void assertPendingPrefetchInvalidatedBySuspend(MacMetalSurface surface, Canvas canvas) throws Exception
+	{
+		Path log = Files.createTempFile("rlhd-metal-pending-suspend-", ".jsonl");
+		MetalControlRenderer renderer = renderer(surface, log, PresentMode.FIFO_LIKE, "stalled-drawable");
+		assertEquals(FrameOutcome.SKIPPED_IN_FLIGHT, renderer.render(surface.extent(), 5500));
+		surface.resize(0, 0, scale(canvas));
+		assertEquals(FrameOutcome.SKIPPED_SUSPENDED, renderer.render(surface.extent(), 5501));
+		await("pending suspend acquisition", () -> acquisitionsDrained(renderer));
+		assertEquals(0, renderer.counters().nilDrawable());
+		resize(surface, canvas.getWidth(), canvas.getHeight(), canvas);
+		renderer.close();
+		assertEquals(0, renderer.counters().liveNativeObjects());
+		TimingJsonSchema.validateLog(Files.readAllLines(log));
+	}
+
+	private static void primeReadyPrefetch(MetalControlRenderer renderer, MacMetalSurface surface, long firstFrame) throws Exception
+	{
+		submitOne(renderer, surface, firstFrame);
+		await("ready drawable prefetch", () ->
+		{
+			MetalControlCounters counters = renderer.counters();
+			return counters.submitted() == counters.completed() &&
+				counters.drawableAcquisitionRequests() >= 2 && acquisitionsDrained(counters) && counters.nilDrawable() == 0;
+		});
+	}
+
+	private static boolean acquisitionsDrained(MetalControlRenderer renderer)
+	{
+		return acquisitionsDrained(renderer.counters());
+	}
+
+	private static boolean acquisitionsDrained(MetalControlCounters counters)
+	{
+		return counters.drawableAcquisitionRequests() == counters.drawableAcquisitionCompletions();
+	}
+
+	private static void await(String description, BooleanSupplier condition) throws Exception
+	{
+		long deadline = System.nanoTime() + 2_000_000_000L;
+		while (!condition.getAsBoolean() && System.nanoTime() < deadline)
+		{
+			Thread.sleep(2);
+		}
+		assertTrue("Timed out waiting for " + description, condition.getAsBoolean());
 	}
 
 	private static MetalControlRenderer renderer(MacMetalSurface surface, Path log, PresentMode mode, String failure)

@@ -170,6 +170,12 @@ typedef struct MetalControlState
 	bool acquisition_returned_nil;
 	uint64_t acquisition_generation;
 	id<CAMetalDrawable> ready_drawable;
+	NSUInteger ready_drawable_width;
+	NSUInteger ready_drawable_height;
+	NSUInteger requested_drawable_width;
+	NSUInteger requested_drawable_height;
+	bool extent_valid;
+	bool suspended;
 	bool stall_drawable;
 	bool ignore_present_mode_setter;
 	bool unsupported_present_callback;
@@ -549,17 +555,51 @@ static void release_ready_drawable_locked(MetalControlState *state)
 		state->ready_drawable = nil;
 		track_release(state);
 	}
+	state->ready_drawable_width = 0;
+	state->ready_drawable_height = 0;
+}
+
+static void invalidate_drawable_acquisition_locked(MetalControlState *state)
+{
+	state->acquisition_generation++;
+	state->acquisition_returned_nil = false;
+	release_ready_drawable_locked(state);
+}
+
+static void suspend_drawable_acquisition_locked(MetalControlState *state)
+{
+	if (!state->suspended)
+	{
+		invalidate_drawable_acquisition_locked(state);
+		state->suspended = true;
+	}
+}
+
+static void update_drawable_extent_locked(MetalControlState *state, NSUInteger width, NSUInteger height)
+{
+	if (!state->extent_valid || state->suspended ||
+		state->requested_drawable_width != width || state->requested_drawable_height != height)
+	{
+		invalidate_drawable_acquisition_locked(state);
+		state->requested_drawable_width = width;
+		state->requested_drawable_height = height;
+		state->extent_valid = true;
+		state->suspended = false;
+	}
 }
 
 static void schedule_drawable_acquisition_locked(MetalControlState *state)
 {
-	if (!state->accepting || state->acquisition_pending || state->ready_drawable != nil)
+	if (!state->accepting || !state->extent_valid || state->suspended ||
+		state->acquisition_pending || state->ready_drawable != nil)
 	{
 		return;
 	}
 	state->acquisition_pending = true;
 	state->counters[COUNTER_DRAWABLE_ACQUISITION_REQUESTS]++;
 	uint64_t generation = state->acquisition_generation;
+	NSUInteger requested_width = state->requested_drawable_width;
+	NSUInteger requested_height = state->requested_drawable_height;
 	dispatch_async(state->drawable_queue, ^{
 		@autoreleasepool
 		{
@@ -573,15 +613,23 @@ static void schedule_drawable_acquisition_locked(MetalControlState *state)
 			{
 				acquired = [[state->layer nextDrawable] retain];
 			}
+			NSUInteger acquired_width = acquired == nil ? 0 : acquired.texture.width;
+			NSUInteger acquired_height = acquired == nil ? 0 : acquired.texture.height;
 			pthread_mutex_lock(&state->mutex);
 			state->counters[COUNTER_DRAWABLE_ACQUISITION_COMPLETIONS]++;
-			if (state->accepting && generation == state->acquisition_generation && acquired != nil && state->ready_drawable == nil)
+			bool request_is_current = state->accepting && state->extent_valid && !state->suspended &&
+				generation == state->acquisition_generation && requested_width == state->requested_drawable_width &&
+				requested_height == state->requested_drawable_height;
+			if (request_is_current && acquired != nil && state->ready_drawable == nil &&
+				acquired_width == requested_width && acquired_height == requested_height)
 			{
 				state->ready_drawable = acquired;
+				state->ready_drawable_width = acquired_width;
+				state->ready_drawable_height = acquired_height;
 				track_create(state);
 				acquired = nil;
 			}
-			else if (state->accepting && generation == state->acquisition_generation && acquired == nil)
+			else if (request_is_current && acquired == nil)
 			{
 				state->acquisition_returned_nil = true;
 				state->counters[COUNTER_NIL_DRAWABLE]++;
@@ -745,7 +793,6 @@ JNIEXPORT jlong JNICALL Java_rs117_hd_spikes_macos_control_MetalControlNative_na
 			configure_present_mode_locked(state, state->requested_mode);
 		}
 		log_run_start(state);
-		if (state->ready) schedule_drawable_acquisition_locked(state);
 		return (jlong) (intptr_t) state;
 	}
 }
@@ -843,6 +890,7 @@ JNIEXPORT jint JNICALL Java_rs117_hd_spikes_macos_control_MetalControlNative_nat
 		pthread_mutex_unlock(&state->mutex);
 		return OUTCOME_REJECTED;
 	}
+	suspend_drawable_acquisition_locked(state);
 	state->counters[COUNTER_SKIPPED_SUSPENDED]++;
 	log_frame(state, (uint64_t) frame_id, 0, 0, state->requested_mode, state->effective_mode,
 		OUTCOME_SKIPPED_SUSPENDED, 0, 0, 0, 0, 0, 0, 0.0, 0.0, false, false, "not-requested", 0.0, NULL);
@@ -871,6 +919,7 @@ JNIEXPORT jint JNICALL Java_rs117_hd_spikes_macos_control_MetalControlNative_nat
 		}
 		if (width <= 0 || height <= 0)
 		{
+			suspend_drawable_acquisition_locked(state);
 			state->counters[COUNTER_SKIPPED_SUSPENDED]++;
 			log_frame(state, (uint64_t) frame_id, 0, 0, state->requested_mode, state->effective_mode,
 				OUTCOME_SKIPPED_SUSPENDED, 0, 0, 0, 0, monotonic_ns() - frame_start,
@@ -878,6 +927,7 @@ JNIEXPORT jint JNICALL Java_rs117_hd_spikes_macos_control_MetalControlNative_nat
 			pthread_mutex_unlock(&state->mutex);
 			return OUTCOME_SKIPPED_SUSPENDED;
 		}
+		update_drawable_extent_locked(state, (NSUInteger) width, (NSUInteger) height);
 		id<MTLDevice> preferred = preferred_device(state);
 		if (preferred != nil && preferred != state->device)
 		{
@@ -916,6 +966,12 @@ JNIEXPORT jint JNICALL Java_rs117_hd_spikes_macos_control_MetalControlNative_nat
 				0, 0.0, 0.0, false, false, "not-requested", 0.0, NULL);
 			pthread_mutex_unlock(&state->mutex);
 			return OUTCOME_SKIPPED_IN_FLIGHT;
+		}
+		if (state->ready_drawable != nil &&
+			(state->ready_drawable_width != (NSUInteger) width || state->ready_drawable_height != (NSUInteger) height ||
+			state->ready_drawable.texture.width != (NSUInteger) width || state->ready_drawable.texture.height != (NSUInteger) height))
+		{
+			invalidate_drawable_acquisition_locked(state);
 		}
 		if (state->ready_drawable == nil)
 		{
