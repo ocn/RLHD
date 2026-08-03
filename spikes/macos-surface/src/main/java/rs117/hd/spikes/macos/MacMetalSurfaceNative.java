@@ -56,6 +56,12 @@ final class MacMetalSurfaceNative implements NativeSurfaceAccess
 	}
 
 	@Override
+	public void assertLayerState(long stateHandle, SurfaceExtent extent)
+	{
+		nativeAssertLayerState(stateHandle, extent.logicalWidth(), extent.logicalHeight(), extent.backingScale());
+	}
+
+	@Override
 	public void detach(long stateHandle)
 	{
 		nativeDetach(stateHandle);
@@ -74,6 +80,8 @@ final class MacMetalSurfaceNative implements NativeSurfaceAccess
 	private static native void nativeResize(long stateHandle, int logicalWidth, int logicalHeight, double backingScale);
 
 	private static native long nativeLayerHandle(long stateHandle);
+
+	private static native void nativeAssertLayerState(long stateHandle, int logicalWidth, int logicalHeight, double backingScale);
 
 	private static native void nativeDetach(long stateHandle);
 

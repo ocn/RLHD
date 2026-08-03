@@ -44,11 +44,14 @@ public class MacMetalSurfaceIntegrationTest
 				surface.attach(canvas);
 				assertNotEquals(0L, surface.metalLayerHandle());
 				surface.resize(320, 180, scale);
+				surface.assertLayerStateForTesting();
 				assertEquals(320 * scale, surface.extent().pixelWidth(), 0.0);
 				assertFalse(surface.extent().suspended());
 				surface.resize(0, 0, scale);
+				surface.assertLayerStateForTesting();
 				assertTrue(surface.extent().suspended());
 				surface.resize(320, 180, scale);
+				surface.assertLayerStateForTesting();
 				assertFalse(surface.extent().suspended());
 				surface.detach();
 			}

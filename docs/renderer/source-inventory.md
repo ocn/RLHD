@@ -11,5 +11,6 @@ All investigations and comparisons use the following immutable commit IDs. Refre
 | [LWJGLX/lwjgl3-awt](https://github.com/LWJGLX/lwjgl3-awt/tree/7c3e75295da6a0af3b96a1dfa9decef331689e60) | `7c3e75295da6a0af3b96a1dfa9decef331689e60` | AWT/native-surface reference. |
 | [KhronosGroup/MoltenVK](https://github.com/KhronosGroup/MoltenVK/tree/df94d24c1c515eb9c6f89f82a965201e2fc43254) | `df94d24c1c515eb9c6f89f82a965201e2fc43254` | macOS Vulkan portability reference. |
 | [dennisdevulder/gpu-vulkan](https://github.com/dennisdevulder/gpu-vulkan/tree/12f8db08c8bac0d0180f96738b1fd9b075215496) | `12f8db08c8bac0d0180f96738b1fd9b075215496` | Prior Vulkan experiment reference. |
+| [Adoptium JDK 21u](https://github.com/adoptium/jdk21u/tree/04806bcb1d50b35efc1c22a4d3b082c9a9a47563) | `04806bcb1d50b35efc1c22a4d3b082c9a9a47563` | Exact source lineage recorded by the installed Temurin 21.0.12+8 macOS arm64 JDK; also the peeled `jdk-21.0.12+8_adopt` tag. |
 
 The `rlawt` primary repository is `runelite/rlawt`; its recorded commit remains the verified `master` tip used by this evidence set. No rlawt code is copied or added as a dependency here.

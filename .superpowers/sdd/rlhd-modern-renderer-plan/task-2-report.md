@@ -121,3 +121,35 @@ Result: `ecb6599caaaa12b1ddfe4d955cceb2e69fb06702 refs/heads/master`; `docs/rend
 - Detach leaves one hidden, inert, zero-sized, unparented plain CALayer sentinel owned by the Canvas's JAWT surface layers instead of a literal `nil`, because the tested OpenJDK nil setter retains a dangling pointer. The next attach replaces/releases it normally. Current `AWTSurfaceLayers.dealloc` does not release `layer`, so terminal detach without later replacement leaks one tiny sentinel retain per Canvas even after peer destruction. This bounded public-ABI tradeoff should be revalidated when the JDK implementation changes.
 - Native output is intentionally arm64-only and local-fork-only. Universal/x86_64 packaging, code signing, notarization, and Plugin Hub distribution are outside Task 2; Plugin Hub's JNI restriction still applies.
 - The optional offline Metal shader compiler remains unavailable and was not used; this task contains no shader or renderer.
+
+## Review fixes
+
+Status: DONE_WITH_CONCERNS
+
+The review follow-up preserves the wrapper state when native close fails: `stateHandle`, attachment, Canvas, and extent are cleared only after `nativeClose` returns successfully. A fail-once fake-native test verifies that the original extent and borrowed layer handle remain usable after the exception, a resize still succeeds, close can be retried, and all operations reject only after the successful retry.
+
+JAWT drawing-surface width and height are now copied while `JAWT_DrawingSurfaceInfo` remains locked. Attach creates the CAMetalLayer on AppKit with a zero anchor and origin-zero frame using those copied dimensions; resize updates the complete origin-zero frame, scale, and, for active extents, exact scaled `drawableSize`. A package-private test-only JNI assertion snapshots only public Objective-C properties and verifies installed-layer identity, frame, bounds, scale, `MTLPixelFormatBGRA8Unorm`, lifecycle suspension, and drawable size on every resize in all 100 headful cycles.
+
+The first zero-extent assertion recorded an important runtime fact: on this Temurin/macOS combination, assigning `CGSizeZero` to `CAMetalLayer.drawableSize` left the prior `320x180` allocation visible even though frame and bounds became `0x0`. The final bridge therefore does not overwrite the last nonzero drawable allocation while suspended. Suspension is defined by the lifecycle extent plus a zero frame/bounds dimension; the bridge never calls `nextDrawable`, and the README requires a future renderer to gate acquisition on `extent().suspended()`. Restore again verifies the exact nonzero drawable size.
+
+The JDK evidence is now immutable and exact. The installed Temurin `21.0.12+8` `release` file records Adoptium source commit `04806bcb1d50b35efc1c22a4d3b082c9a9a47563`; `git ls-remote` matched it to the peeled `jdk-21.0.12+8_adopt` tag. The pinned source at that revision confirms `AWTSurfaceLayers.setLayer(nil)` releases/removes the old layer without clearing its ivar and `dealloc` does not release `layer`. `provenance.md` and `source-inventory.md` now link that exact revision rather than mutable OpenJDK `master`.
+
+Both native Gradle tasks declare `os.name`, `os.arch`, and `java.home` inputs. Running `buildMacSurfaceNative` with `-Dos.arch=x86_64` invalidated the prior output and executed the expected arm64 guard failure; rerunning both native build tasks with unchanged native arm64 JDK inputs reported both `UP-TO-DATE`. The README now requires a caller-supplied full native arm64 JDK, labels the `/private/tmp/rlhd-toolchains/...` value as this-session-only, and documents the CAMetalLayer handle as a borrowed, attached-lifetime, serialized, backend-specific pointer.
+
+Fresh final verification:
+
+```sh
+JAVA_HOME=/private/tmp/rlhd-toolchains/temurin-21/Contents/Home ./gradlew --no-daemon --rerun-tasks macSurfaceSpikeCheck macSurfaceSpikeJar macSurfaceIntegrationTest test jar
+```
+
+Result: `BUILD SUCCESSFUL in 44s`, 14/14 tasks executed. The native harness completed 100 cycles; 10 deterministic spike tests, one 100-cycle headful geometry/lifecycle integration test, and 20 root tests passed with zero failures/errors/skips.
+
+```sh
+NSZombieEnabled=YES JAVA_HOME=/private/tmp/rlhd-toolchains/temurin-21/Contents/Home ./gradlew --no-daemon --rerun-tasks macSurfaceSpikeCheck macSurfaceIntegrationTest
+```
+
+Result: `BUILD SUCCESSFUL in 4s`, 7/7 tasks executed, both 100-cycle suites passed, and no zombie-object diagnostic was emitted. The standalone lifecycle harness also passed 100 cycles under AddressSanitizer with no diagnostic.
+
+Artifact checks reconfirmed an arm64 Mach-O dylib and harness, a non-fat arm64 dylib, only the expected Cocoa/QuartzCore/Metal/system links, and seven JNI exports including the test-only `nativeAssertLayerState`. Every spike and spike-test class remains Java 11 bytecode version 55.0. The ordinary production JAR contains the existing OpenGL renderer and no spike/native entry; the explicit spike JAR contains only the surface classes. `git diff --check` passed.
+
+The remaining concerns are unchanged except for the now-documented suspension contract: terminal detach can leak one tiny inert unparented sentinel retain per Canvas on this exact JDK implementation; native packaging remains arm64/local-fork-only; and any future renderer must never request a drawable while the extent is suspended.

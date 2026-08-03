@@ -76,6 +76,31 @@ public class MacMetalSurfaceTest
 	}
 
 	@Test
+	public void preservesAttachedStateWhenCloseFailsAndAllowsRetry()
+	{
+		FakeNativeSurfaceAccess nativeAccess = new FakeNativeSurfaceAccess();
+		nativeAccess.failCloseOnce = true;
+		MacMetalSurface surface = new MacMetalSurface(nativeAccess, false, false);
+		surface.attach(new Canvas());
+		surface.resize(640, 360, 2.0);
+		SurfaceExtent extentBeforeClose = surface.extent();
+
+		assertThrows(IllegalStateException.class, surface::close);
+		assertEquals(extentBeforeClose, surface.extent());
+		assertEquals(0x117L, surface.metalLayerHandle());
+		assertTrue(nativeAccess.attached);
+		assertEquals(1, nativeAccess.closeCalls);
+
+		surface.resize(320, 180, 1.5);
+		assertEquals(SurfaceExtent.of(320, 180, 1.5), surface.extent());
+		surface.close();
+		assertEquals(2, nativeAccess.closeCalls);
+		assertThrows(IllegalStateException.class, surface::extent);
+		assertThrows(IllegalStateException.class, surface::metalLayerHandle);
+		assertThrows(IllegalStateException.class, surface::close);
+	}
+
+	@Test
 	public void validatesCanvasBeforeCreatingNativeState()
 	{
 		FakeNativeSurfaceAccess nativeAccess = new FakeNativeSurfaceAccess();
@@ -133,6 +158,7 @@ public class MacMetalSurfaceTest
 		private int detachCalls;
 		private int closeCalls;
 		private boolean attached;
+		private boolean failCloseOnce;
 
 		@Override
 		public long create()
@@ -167,6 +193,13 @@ public class MacMetalSurfaceTest
 		}
 
 		@Override
+		public void assertLayerState(long stateHandle, SurfaceExtent extent)
+		{
+			assertEquals(1L, stateHandle);
+			assertTrue(attached);
+		}
+
+		@Override
 		public void detach(long stateHandle)
 		{
 			assertEquals(1L, stateHandle);
@@ -179,8 +212,13 @@ public class MacMetalSurfaceTest
 		public void close(long stateHandle)
 		{
 			assertEquals(1L, stateHandle);
-			attached = false;
 			closeCalls++;
+			if (failCloseOnce)
+			{
+				failCloseOnce = false;
+				throw new IllegalStateException("Simulated native close failure.");
+			}
+			attached = false;
 		}
 	}
 }

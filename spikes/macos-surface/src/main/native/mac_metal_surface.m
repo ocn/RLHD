@@ -7,7 +7,9 @@
 #import <jni.h>
 
 #include <pthread.h>
+#include <math.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -19,7 +21,26 @@ typedef struct MacMetalSurfaceState
 	RlhdSurfaceLifecycle lifecycle;
 	id<JAWT_SurfaceLayers> surface_layers;
 	CAMetalLayer *metal_layer;
+	CGSize last_drawable_size;
+	bool has_drawable_size;
 } MacMetalSurfaceState;
+
+typedef struct AcquiredSurface
+{
+	id<JAWT_SurfaceLayers> layers;
+	jint width;
+	jint height;
+} AcquiredSurface;
+
+typedef struct LayerSnapshot
+{
+	bool installed;
+	CGRect frame;
+	CGRect bounds;
+	CGSize drawable_size;
+	CGFloat contents_scale;
+	MTLPixelFormat pixel_format;
+} LayerSnapshot;
 
 static void throw_exception(JNIEnv *env, const char *class_name, const char *message)
 {
@@ -52,25 +73,25 @@ static void dispatch_main_sync(dispatch_block_t block)
 	}
 }
 
-static id<JAWT_SurfaceLayers> acquire_surface_layers(JNIEnv *env, jobject canvas)
+static bool acquire_surface(JNIEnv *env, jobject canvas, AcquiredSurface *acquired)
 {
+	memset(acquired, 0, sizeof(*acquired));
 	JAWT awt;
 	memset(&awt, 0, sizeof(awt));
 	awt.version = JAWT_VERSION_1_4 | JAWT_MACOSX_USE_CALAYER;
 	if (JAWT_GetAWT(env, &awt) == JNI_FALSE)
 	{
 		throw_exception(env, "java/lang/IllegalStateException", "JAWT_GetAWT failed for the Canvas.");
-		return nil;
+		return false;
 	}
 
 	JAWT_DrawingSurface *drawing_surface = awt.GetDrawingSurface(env, canvas);
 	if (drawing_surface == NULL)
 	{
 		throw_exception(env, "java/lang/IllegalStateException", "JAWT could not acquire the Canvas drawing surface.");
-		return nil;
+		return false;
 	}
 
-	id<JAWT_SurfaceLayers> surface_layers = nil;
 	jint lock_result = drawing_surface->Lock(drawing_surface);
 	if ((lock_result & JAWT_LOCK_ERROR) == 0)
 	{
@@ -79,7 +100,9 @@ static id<JAWT_SurfaceLayers> acquire_surface_layers(JNIEnv *env, jobject canvas
 		{
 			if (surface_info->platformInfo != NULL)
 			{
-				surface_layers = (id<JAWT_SurfaceLayers>) [(id) surface_info->platformInfo retain];
+				acquired->layers = (id<JAWT_SurfaceLayers>) [(id) surface_info->platformInfo retain];
+				acquired->width = surface_info->bounds.width;
+				acquired->height = surface_info->bounds.height;
 			}
 			drawing_surface->FreeDrawingSurfaceInfo(surface_info);
 		}
@@ -87,11 +110,17 @@ static id<JAWT_SurfaceLayers> acquire_surface_layers(JNIEnv *env, jobject canvas
 	}
 	awt.FreeDrawingSurface(drawing_surface);
 
-	if (surface_layers == nil)
+	if (acquired->layers == nil)
 	{
 		throw_exception(env, "java/lang/IllegalStateException", "JAWT did not provide macOS surface layers.");
+		return false;
 	}
-	return surface_layers;
+	return true;
+}
+
+static bool nearly_equal(double actual, double expected)
+{
+	return fabs(actual - expected) <= 0.000001;
 }
 
 static bool release_attached_objects(MacMetalSurfaceState *state)
@@ -174,8 +203,8 @@ JNIEXPORT void JNICALL Java_rs117_hd_spikes_macos_MacMetalSurfaceNative_nativeAt
 			return;
 		}
 
-		id<JAWT_SurfaceLayers> surface_layers = acquire_surface_layers(env, canvas);
-		if (surface_layers == nil)
+		AcquiredSurface acquired;
+		if (!acquire_surface(env, canvas, &acquired))
 		{
 			pthread_mutex_unlock(&state->mutex);
 			return;
@@ -183,7 +212,11 @@ JNIEXPORT void JNICALL Java_rs117_hd_spikes_macos_MacMetalSurfaceNative_nativeAt
 
 		__block CAMetalLayer *metal_layer = nil;
 		dispatch_main_sync(^{
+			CGFloat width = (CGFloat) (acquired.width > 0 ? acquired.width : 0);
+			CGFloat height = (CGFloat) (acquired.height > 0 ? acquired.height : 0);
 			metal_layer = [[CAMetalLayer alloc] init];
+			metal_layer.anchorPoint = CGPointZero;
+			metal_layer.frame = CGRectMake(0.0, 0.0, width, height);
 			metal_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
 			metal_layer.contentsScale = 1.0;
 			metal_layer.drawableSize = CGSizeZero;
@@ -196,19 +229,21 @@ JNIEXPORT void JNICALL Java_rs117_hd_spikes_macos_MacMetalSurfaceNative_nativeAt
 			};
 			[CATransaction begin];
 			[CATransaction setDisableActions:YES];
-			surface_layers.layer = metal_layer;
+			acquired.layers.layer = metal_layer;
 			[CATransaction commit];
 		});
 
 		if (metal_layer == nil)
 		{
-			dispatch_main_sync(^{ [(id) surface_layers release]; });
+			dispatch_main_sync(^{ [(id) acquired.layers release]; });
 			pthread_mutex_unlock(&state->mutex);
 			throw_exception(env, "java/lang/IllegalStateException", "Unable to create CAMetalLayer.");
 			return;
 		}
-		state->surface_layers = surface_layers;
+		state->surface_layers = acquired.layers;
 		state->metal_layer = metal_layer;
+		state->last_drawable_size = CGSizeZero;
+		state->has_drawable_size = false;
 		(void) rlhd_surface_attach(&state->lifecycle);
 		pthread_mutex_unlock(&state->mutex);
 	}
@@ -236,12 +271,83 @@ JNIEXPORT void JNICALL Java_rs117_hd_spikes_macos_MacMetalSurfaceNative_nativeRe
 		dispatch_main_sync(^{
 			[CATransaction begin];
 			[CATransaction setDisableActions:YES];
-			state->metal_layer.bounds = CGRectMake(0.0, 0.0, logical_width, logical_height);
+			state->metal_layer.anchorPoint = CGPointZero;
+			state->metal_layer.frame = CGRectMake(0.0, 0.0, logical_width, logical_height);
 			state->metal_layer.contentsScale = backing_scale;
-			state->metal_layer.drawableSize = CGSizeMake(logical_width * backing_scale, logical_height * backing_scale);
+			if (!state->lifecycle.suspended)
+			{
+				state->last_drawable_size = CGSizeMake(logical_width * backing_scale, logical_height * backing_scale);
+				state->has_drawable_size = true;
+				state->metal_layer.drawableSize = state->last_drawable_size;
+			}
 			[CATransaction commit];
 		});
 		pthread_mutex_unlock(&state->mutex);
+	}
+}
+
+JNIEXPORT void JNICALL Java_rs117_hd_spikes_macos_MacMetalSurfaceNative_nativeAssertLayerState(JNIEnv *env, jclass type, jlong handle, jint logical_width, jint logical_height, jdouble backing_scale)
+{
+	(void) type;
+	@autoreleasepool
+	{
+		MacMetalSurfaceState *state = state_from_handle(env, handle);
+		if (state == NULL)
+		{
+			return;
+		}
+		pthread_mutex_lock(&state->mutex);
+		if (state->lifecycle.phase != RLHD_SURFACE_ATTACHED || state->surface_layers == nil || state->metal_layer == nil)
+		{
+			pthread_mutex_unlock(&state->mutex);
+			throw_exception(env, "java/lang/IllegalStateException", "Native surface is not attached.");
+			return;
+		}
+
+		bool lifecycle_suspended = state->lifecycle.suspended;
+		bool has_drawable_size = state->has_drawable_size;
+		CGSize last_drawable_size = state->last_drawable_size;
+		__block LayerSnapshot snapshot;
+		memset(&snapshot, 0, sizeof(snapshot));
+		dispatch_main_sync(^{
+			snapshot.installed = state->surface_layers.layer == state->metal_layer;
+			snapshot.frame = state->metal_layer.frame;
+			snapshot.bounds = state->metal_layer.bounds;
+			snapshot.drawable_size = state->metal_layer.drawableSize;
+			snapshot.contents_scale = state->metal_layer.contentsScale;
+			snapshot.pixel_format = state->metal_layer.pixelFormat;
+		});
+		pthread_mutex_unlock(&state->mutex);
+
+		double pixel_width = logical_width * backing_scale;
+		double pixel_height = logical_height * backing_scale;
+		bool expected_suspended = logical_width == 0 || logical_height == 0;
+		bool drawable_size_valid = expected_suspended ?
+			(!has_drawable_size || (nearly_equal(snapshot.drawable_size.width, last_drawable_size.width) && nearly_equal(snapshot.drawable_size.height, last_drawable_size.height))) :
+			(nearly_equal(snapshot.drawable_size.width, pixel_width) && nearly_equal(snapshot.drawable_size.height, pixel_height));
+		bool valid = snapshot.installed &&
+			nearly_equal(snapshot.frame.origin.x, 0.0) && nearly_equal(snapshot.frame.origin.y, 0.0) &&
+			nearly_equal(snapshot.frame.size.width, logical_width) && nearly_equal(snapshot.frame.size.height, logical_height) &&
+			nearly_equal(snapshot.bounds.origin.x, 0.0) && nearly_equal(snapshot.bounds.origin.y, 0.0) &&
+			nearly_equal(snapshot.bounds.size.width, logical_width) && nearly_equal(snapshot.bounds.size.height, logical_height) &&
+			drawable_size_valid &&
+			nearly_equal(snapshot.contents_scale, backing_scale) && snapshot.pixel_format == MTLPixelFormatBGRA8Unorm &&
+			expected_suspended == lifecycle_suspended;
+		if (!valid)
+		{
+			char message[1024];
+			snprintf(message, sizeof(message),
+				"CAMetalLayer mismatch: installed=%d frame=(%.3f,%.3f %.3fx%.3f) bounds=(%.3f,%.3f %.3fx%.3f) drawable=%.3fx%.3f scale=%.3f format=%lu suspended=%d; expected=%dx%d drawable=%.3fx%.3f scale=%.3f suspended=%d.",
+				snapshot.installed,
+				(double) snapshot.frame.origin.x, (double) snapshot.frame.origin.y,
+				(double) snapshot.frame.size.width, (double) snapshot.frame.size.height,
+				(double) snapshot.bounds.origin.x, (double) snapshot.bounds.origin.y,
+				(double) snapshot.bounds.size.width, (double) snapshot.bounds.size.height,
+				(double) snapshot.drawable_size.width, (double) snapshot.drawable_size.height,
+				(double) snapshot.contents_scale, (unsigned long) snapshot.pixel_format, lifecycle_suspended,
+				logical_width, logical_height, pixel_width, pixel_height, backing_scale, expected_suspended);
+			throw_exception(env, "java/lang/AssertionError", message);
+		}
 	}
 }
 

@@ -55,6 +55,9 @@ def macSurfaceNativeTestBinary = macSurfaceNativeDir.map { it.file('surface_stat
 tasks.register('buildMacSurfaceNative', Exec) {
 	group = 'verification'
 	description = 'Builds the opt-in arm64 macOS JAWT/CAMetalLayer bridge.'
+	inputs.property('hostOsName', providers.systemProperty('os.name'))
+	inputs.property('hostOsArch', providers.systemProperty('os.arch'))
+	inputs.property('buildJavaHome', providers.systemProperty('java.home'))
 	inputs.files(fileTree("${macSurfaceSpikeDir}/src/main/native") {
 		include '**/*.h', '**/*.c', '**/*.m'
 	})
@@ -90,6 +93,9 @@ tasks.register('buildMacSurfaceNative', Exec) {
 tasks.register('buildMacSurfaceNativeTest', Exec) {
 	group = 'verification'
 	description = 'Builds the deterministic native surface lifecycle harness.'
+	inputs.property('hostOsName', providers.systemProperty('os.name'))
+	inputs.property('hostOsArch', providers.systemProperty('os.arch'))
+	inputs.property('buildJavaHome', providers.systemProperty('java.home'))
 	inputs.files(
 		file("${macSurfaceSpikeDir}/src/main/native/surface_state.h"),
 		file("${macSurfaceSpikeDir}/src/main/native/surface_state.c"),

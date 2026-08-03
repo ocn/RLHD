@@ -91,6 +91,13 @@ public final class MacMetalSurface implements AutoCloseable
 		return layerHandle;
 	}
 
+	synchronized void assertLayerStateForTesting()
+	{
+		ensureOpen();
+		ensureAttached();
+		nativeAccess().assertLayerState(stateHandle, extent);
+	}
+
 	public synchronized void detach()
 	{
 		ensureOpen();
@@ -110,21 +117,15 @@ public final class MacMetalSurface implements AutoCloseable
 		{
 			ensureTreeUnlocked(canvas);
 		}
-		try
+		if (stateHandle != 0)
 		{
-			if (stateHandle != 0)
-			{
-				nativeAccess().close(stateHandle);
-			}
+			nativeAccess().close(stateHandle);
 		}
-		finally
-		{
-			stateHandle = 0;
-			attached = false;
-			closed = true;
-			canvas = null;
-			extent = DETACHED_EXTENT;
-		}
+		stateHandle = 0;
+		attached = false;
+		closed = true;
+		canvas = null;
+		extent = DETACHED_EXTENT;
 	}
 
 	private NativeSurfaceAccess nativeAccess()

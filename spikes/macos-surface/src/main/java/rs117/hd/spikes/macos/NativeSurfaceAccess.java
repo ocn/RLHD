@@ -12,6 +12,8 @@ interface NativeSurfaceAccess
 
 	long layerHandle(long stateHandle);
 
+	void assertLayerState(long stateHandle, SurfaceExtent extent);
+
 	void detach(long stateHandle);
 
 	void close(long stateHandle);
