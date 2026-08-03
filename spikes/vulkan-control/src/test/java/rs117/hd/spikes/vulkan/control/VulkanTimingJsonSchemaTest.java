@@ -8,6 +8,7 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
 import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 
 public class VulkanTimingJsonSchemaTest
 {
@@ -20,6 +21,8 @@ public class VulkanTimingJsonSchemaTest
 		Path path = temporaryFolder.newFile("vulkan.jsonl").toPath();
 		VulkanTimingLog.CapabilityRecord capabilities = new VulkanTimingLog.CapabilityRecord();
 		capabilities.portabilitySubset = true;
+		capabilities.swapchainMaintenance1 = true;
+		capabilities.presentationFences = true;
 		capabilities.colorSpace = "VK_COLOR_SPACE_SRGB_NONLINEAR_KHR";
 		capabilities.requestedImages = 3;
 		capabilities.actualImages = 3;
@@ -35,6 +38,9 @@ public class VulkanTimingJsonSchemaTest
 		long[] counters = new long[VulkanControlCounters.FIELD_COUNT];
 		counters[3] = 1;
 		counters[4] = 1;
+		counters[6] = 1;
+		counters[20] = 1;
+		counters[21] = 1;
 		try (VulkanTimingLog log = new VulkanTimingLog(path))
 		{
 			log.runStart(VulkanPresentMode.FIFO, VulkanPresentMode.FIFO, capabilities);
@@ -47,10 +53,23 @@ public class VulkanTimingJsonSchemaTest
 	@Test
 	public void acceptsStrictCompatibleRunWithCapabilities()
 	{
+		assertTrue(VulkanTimingJsonSchema.runStartFixture().contains("\"swapchain_maintenance1\":true"));
+		assertTrue(VulkanTimingJsonSchema.runStartFixture().contains("\"presentation_fences\":true"));
+		assertTrue(VulkanTimingJsonSchema.runEndFixture().contains("\"validation_errors\":0"));
+		assertTrue(VulkanTimingJsonSchema.runEndFixture().contains("\"timestamp_query_errors\":0"));
 		VulkanTimingJsonSchema.validateLog(Arrays.asList(
 			VulkanTimingJsonSchema.runStartFixture(),
 			VulkanTimingJsonSchema.frameFixture(),
 			VulkanTimingJsonSchema.runEndFixture()));
+	}
+
+	@Test
+	public void rejectsUnbalancedBackendLifetimeCounters()
+	{
+		assertThrows(IllegalArgumentException.class, () -> VulkanTimingJsonSchema.validateLine(
+			VulkanTimingJsonSchema.runEndFixture().replace("\"drawable_acquisition_completions\":1", "\"drawable_acquisition_completions\":0")));
+		assertThrows(IllegalArgumentException.class, () -> VulkanTimingJsonSchema.validateLine(
+			VulkanTimingJsonSchema.runEndFixture().replace("\"present_requested\":1", "\"present_requested\":0")));
 	}
 
 	@Test(expected = IllegalArgumentException.class)

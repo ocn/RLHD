@@ -40,10 +40,24 @@ public class VulkanControlRendererTest
 		assertTrue(backend.consumed);
 	}
 
+	@Test
+	public void failedPostConsumptionCloseLeavesRendererClosed()
+	{
+		FakeBackend backend = new FakeBackend();
+		backend.failCloseAfterConsumption = true;
+		VulkanControlRenderer renderer = new VulkanControlRenderer(backend, Paths.get("timing.jsonl"));
+		assertThrows(VulkanBackendCloseException.class, renderer::close);
+		assertTrue(backend.consumed);
+		assertEquals(0, renderer.counters().liveNativeObjects());
+		assertThrows(IllegalStateException.class, () -> renderer.render(SurfaceExtent.of(1, 1, 1), 9));
+		assertThrows(IllegalStateException.class, renderer::close);
+	}
+
 	private static final class FakeBackend implements VulkanBackendAccess
 	{
 		private final long[] counters = new long[VulkanControlCounters.FIELD_COUNT];
 		private boolean failCloseOnce;
+		private boolean failCloseAfterConsumption;
 		private boolean consumed;
 		private VulkanPresentMode requestedMode = VulkanPresentMode.FIFO;
 
@@ -77,6 +91,7 @@ public class VulkanControlRendererTest
 			consumed = true;
 			counters[13] = 0;
 			System.arraycopy(counters, 0, finalCounters, 0, counters.length);
+			if (failCloseAfterConsumption) throw new VulkanBackendCloseException("injected post-consumption failure", true);
 		}
 	}
 }

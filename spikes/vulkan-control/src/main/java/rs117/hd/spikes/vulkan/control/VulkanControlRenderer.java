@@ -90,7 +90,15 @@ public final class VulkanControlRenderer implements AutoCloseable
 		}
 		catch (RuntimeException | Error ex)
 		{
-			phase = Phase.RUNNING;
+			if (ex instanceof VulkanBackendCloseException && ((VulkanBackendCloseException) ex).consumed())
+			{
+				phase = Phase.CLOSED;
+				finalCounters = new VulkanControlCounters(raw);
+				uiBytes = new byte[0];
+				uiWidth = 0;
+				uiHeight = 0;
+			}
+			else phase = Phase.RUNNING;
 			throw ex;
 		}
 		phase = Phase.CLOSED;

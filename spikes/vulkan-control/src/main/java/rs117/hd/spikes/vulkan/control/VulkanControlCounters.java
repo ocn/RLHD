@@ -4,7 +4,7 @@ import java.util.Arrays;
 
 public final class VulkanControlCounters
 {
-	static final int FIELD_COUNT = 22;
+	static final int FIELD_COUNT = 25;
 	private final long[] values;
 
 	VulkanControlCounters(long[] values)
@@ -38,8 +38,12 @@ public final class VulkanControlCounters
 	public long presentModeDivergences() { return values[19]; }
 	public long drawableAcquisitionRequests() { return values[20]; }
 	public long drawableAcquisitionCompletions() { return values[21]; }
+	public long validationWarnings() { return values[22]; }
+	public long validationErrors() { return values[23]; }
+	public long timestampQueryErrors() { return values[24]; }
 	public long inFlight() { return submitted() - completed(); }
-	public boolean hasErrors() { return initErrors() != 0 || shaderErrors() != 0 || pipelineErrors() != 0 || commandErrors() != 0; }
+	public boolean hasErrors() { return initErrors() != 0 || shaderErrors() != 0 || pipelineErrors() != 0 || commandErrors() != 0 ||
+		validationErrors() != 0 || timestampQueryErrors() != 0; }
 
 	@Override
 	public String toString()

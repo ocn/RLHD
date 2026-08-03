@@ -15,8 +15,12 @@ import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.Configuration;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.EXTDebugUtils;
+import org.lwjgl.vulkan.EXTFullScreenExclusive;
 import org.lwjgl.vulkan.EXTMetalSurface;
+import org.lwjgl.vulkan.EXTSurfaceMaintenance1;
+import org.lwjgl.vulkan.EXTSwapchainMaintenance1;
 import org.lwjgl.vulkan.KHRPortabilityEnumeration;
+import org.lwjgl.vulkan.KHRGetSurfaceCapabilities2;
 import org.lwjgl.vulkan.KHRSurface;
 import org.lwjgl.vulkan.KHRSwapchain;
 import org.lwjgl.vulkan.VK;
@@ -60,8 +64,10 @@ import org.lwjgl.vulkan.VkMemoryAllocateInfo;
 import org.lwjgl.vulkan.VkMemoryRequirements;
 import org.lwjgl.vulkan.VkMetalSurfaceCreateInfoEXT;
 import org.lwjgl.vulkan.VkPhysicalDevice;
+import org.lwjgl.vulkan.VkPhysicalDeviceFeatures2;
 import org.lwjgl.vulkan.VkPhysicalDeviceMemoryProperties;
 import org.lwjgl.vulkan.VkPhysicalDeviceProperties;
+import org.lwjgl.vulkan.VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT;
 import org.lwjgl.vulkan.VkPipelineColorBlendAttachmentState;
 import org.lwjgl.vulkan.VkPipelineColorBlendStateCreateInfo;
 import org.lwjgl.vulkan.VkPipelineDynamicStateCreateInfo;
@@ -79,6 +85,7 @@ import org.lwjgl.vulkan.VkQueue;
 import org.lwjgl.vulkan.VkQueueFamilyProperties;
 import org.lwjgl.vulkan.VkRenderPassBeginInfo;
 import org.lwjgl.vulkan.VkRenderPassCreateInfo;
+import org.lwjgl.vulkan.VkReleaseSwapchainImagesInfoEXT;
 import org.lwjgl.vulkan.VkSamplerCreateInfo;
 import org.lwjgl.vulkan.VkSemaphoreCreateInfo;
 import org.lwjgl.vulkan.VkShaderModuleCreateInfo;
@@ -88,6 +95,7 @@ import org.lwjgl.vulkan.VkSubpassDescription;
 import org.lwjgl.vulkan.VkSurfaceCapabilitiesKHR;
 import org.lwjgl.vulkan.VkSurfaceFormatKHR;
 import org.lwjgl.vulkan.VkSwapchainCreateInfoKHR;
+import org.lwjgl.vulkan.VkSwapchainPresentFenceInfoEXT;
 import org.lwjgl.vulkan.VkViewport;
 import org.lwjgl.vulkan.VkWriteDescriptorSet;
 import rs117.hd.spikes.macos.control.SyntheticUi;
@@ -131,10 +139,14 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 	private static final int COUNTER_PRESENT_MODE_DIVERGENCES = 19;
 	private static final int COUNTER_ACQUISITION_REQUESTS = 20;
 	private static final int COUNTER_ACQUISITION_COMPLETIONS = 21;
+	private static final int COUNTER_VALIDATION_WARNINGS = 22;
+	private static final int COUNTER_VALIDATION_ERRORS = 23;
+	private static final int COUNTER_TIMESTAMP_QUERY_ERRORS = 24;
 
 	private final long[] counterValues = new long[VulkanControlCounters.FIELD_COUNT];
 	private final VulkanTimingLog timingLog;
 	private final boolean validationRequested;
+	private final VulkanFailureInjector failureInjector;
 	private final long layerHandle;
 	private VulkanPresentMode requestedMode;
 	private VulkanPresentMode effectiveMode = VulkanPresentMode.FIFO;
@@ -145,6 +157,7 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 	private boolean validationEnabled;
 	private boolean debugUtilsEnabled;
 	private boolean portabilitySubset;
+	private boolean swapchainMaintenance1;
 	private String initializationError;
 	private List<String> instanceExtensions = new ArrayList<>();
 	private List<String> deviceExtensions = new ArrayList<>();
@@ -172,11 +185,18 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 	LwjglVulkanBackend(long layerHandle, int initialWidth, int initialHeight, Path timingLog,
 		VulkanPresentMode requestedMode, boolean validationRequested)
 	{
+		this(layerHandle, initialWidth, initialHeight, timingLog, requestedMode, validationRequested, VulkanFailureInjector.NONE);
+	}
+
+	LwjglVulkanBackend(long layerHandle, int initialWidth, int initialHeight, Path timingLog,
+		VulkanPresentMode requestedMode, boolean validationRequested, VulkanFailureInjector failureInjector)
+	{
 		if (layerHandle == 0) throw new IllegalArgumentException("A borrowed CAMetalLayer handle is required.");
 		if (requestedMode == VulkanPresentMode.MAILBOX) throw new IllegalArgumentException("MAILBOX is not a requested mode.");
 		this.layerHandle = layerHandle;
 		this.requestedMode = requestedMode;
 		this.validationRequested = validationRequested;
+		this.failureInjector = java.util.Objects.requireNonNull(failureInjector, "failureInjector");
 		this.timingLog = new VulkanTimingLog(timingLog);
 		try
 		{
@@ -214,11 +234,21 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 		finishFrame(frame, true);
 		if (swapchain == null || width != swapchain.requestedWidth || height != swapchain.requestedHeight || recreatePending)
 		{
-			recreateSwapchain(width, height);
+			try
+			{
+				recreateSwapchain(width, height);
+			}
+			catch (RuntimeException | Error ex)
+			{
+				counterValues[COUNTER_COMMAND_ERRORS]++;
+				accepting = false;
+				failedFrame(frameId, width, height, uiGenerateNs, VulkanFrameOutcome.ERROR, message(ex));
+				throw ex;
+			}
 		}
 		frame = frames[frameCursor];
 		byte[] uploadBytes = uiBytes;
-		if (uploadBytes.length != frame.staging.size)
+		if (width != swapchain.width || height != swapchain.height)
 		{
 			long regenerateStart = System.nanoTime();
 			uploadBytes = new byte[SyntheticUi.byteCount(swapchain.width, swapchain.height)];
@@ -242,48 +272,137 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 			if (acquire == VK_SUBOPTIMAL_KHR) recreatePending = true;
 			imageIndex = image.get(0);
 		}
-		long imageFence = swapchain.imageFences[imageIndex];
-		if (imageFence != NULL && imageFence != frame.fence) check(vkWaitForFences(device, imageFence, true, -1L), "vkWaitForFences(image)");
-		long uploadStart = System.nanoTime();
-		upload(frame.staging, uploadBytes);
-		long uploadNs = System.nanoTime() - uploadStart;
-		counterValues[COUNTER_UI_UPLOAD_BYTES] += uploadBytes.length;
-		long encodeStart = System.nanoTime();
-		recordFrame(frame, imageIndex, frameId);
-		long encodeNs = System.nanoTime() - encodeStart;
-		check(vkResetFences(device, frame.fence), "vkResetFences");
-		long submitStart = System.nanoTime();
+		boolean submitted = false;
+		boolean frameFenceReset = false;
+		try
+		{
+			failureInjector.check("after-acquire");
+			retirePresentationForImage(swapchain, imageIndex);
+			long imageFence = swapchain.imageFences[imageIndex];
+			if (imageFence != NULL && imageFence != frame.fence)
+				check(vkWaitForFences(device, imageFence, true, -1L), "vkWaitForFences(image)");
+			long uploadStart = System.nanoTime();
+			upload(frame.staging, uploadBytes);
+			long uploadNs = System.nanoTime() - uploadStart;
+			counterValues[COUNTER_UI_UPLOAD_BYTES] += uploadBytes.length;
+			long encodeStart = System.nanoTime();
+			recordFrame(frame, imageIndex, frameId);
+			failureInjector.check("after-record");
+			long encodeNs = System.nanoTime() - encodeStart;
+			check(vkResetFences(device, frame.fence), "vkResetFences");
+			frameFenceReset = true;
+			long submitStart = System.nanoTime();
+			try (MemoryStack stack = MemoryStack.stackPush())
+			{
+				failureInjector.check("before-submit");
+				VkSubmitInfo submit = VkSubmitInfo.calloc(stack).sType$Default()
+					.waitSemaphoreCount(1).pWaitSemaphores(stack.longs(frame.acquireSemaphore))
+					.pWaitDstStageMask(stack.ints(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT))
+					.pCommandBuffers(stack.pointers(frame.commandBuffer.address()))
+					.pSignalSemaphores(stack.longs(swapchain.renderFinishedSemaphores[imageIndex]));
+				check(vkQueueSubmit(graphicsQueue, submit, frame.fence), "vkQueueSubmit");
+			}
+			submitted = true;
+			long submitNs = System.nanoTime() - submitStart;
+			frame.pending = submittedRecord(frameId, swapchain.width, swapchain.height, uiGenerateNs, uploadNs, encodeNs, submitNs,
+				System.nanoTime() - frameStart + uiGenerateNs);
+			frame.submitted = true;
+			frame.imageIndex = imageIndex;
+			swapchain.imageFences[imageIndex] = frame.fence;
+			counterValues[COUNTER_SUBMITTED]++;
+			counterValues[COUNTER_PRESENT_REQUESTED]++;
+			long inFlight = counterValues[COUNTER_SUBMITTED] - counterValues[COUNTER_COMPLETED];
+			counterValues[COUNTER_MAX_IN_FLIGHT] = Math.max(counterValues[COUNTER_MAX_IN_FLIGHT], inFlight);
+			int present;
+			try (MemoryStack stack = MemoryStack.stackPush())
+			{
+				VkSwapchainPresentFenceInfoEXT presentFence = VkSwapchainPresentFenceInfoEXT.calloc(stack).sType$Default()
+					.pFences(stack.longs(swapchain.presentFences[imageIndex]));
+				VkPresentInfoKHR info = VkPresentInfoKHR.calloc(stack).sType$Default().pNext(presentFence)
+					.pWaitSemaphores(stack.longs(swapchain.renderFinishedSemaphores[imageIndex]))
+					.swapchainCount(1).pSwapchains(stack.longs(swapchain.handle)).pImageIndices(stack.ints(imageIndex));
+				present = KHRSwapchain.vkQueuePresentKHR(presentQueue, info);
+			}
+			if (presentationWasEnqueued(present)) swapchain.presentFenceLive[imageIndex] = true;
+			if (present == VK_ERROR_OUT_OF_DATE_KHR || present == VK_SUBOPTIMAL_KHR) recreatePending = true;
+			else if (present != VK_SUCCESS) throw failure("vkQueuePresentKHR", present);
+			frameCursor = (frameCursor + 1) % FRAME_COUNT;
+			return VulkanFrameOutcome.SUBMITTED;
+		}
+		catch (RuntimeException | Error ex)
+		{
+			if (!submitted)
+			{
+				try
+				{
+					consumeAndReleaseAcquiredImage(frame, imageIndex, frameFenceReset);
+				}
+				catch (RuntimeException | Error cleanup)
+				{
+					ex.addSuppressed(cleanup);
+				}
+				failedFrame(frameId, width, height, uiGenerateNs, VulkanFrameOutcome.ERROR, message(ex));
+			}
+			else if (frame.pending != null) frame.pending.error = message(ex);
+			counterValues[COUNTER_COMMAND_ERRORS]++;
+			accepting = false;
+			throw ex;
+		}
+	}
+
+	private void retirePresentationForImage(SwapchainData data, int imageIndex)
+	{
+		if (!data.presentFenceLive[imageIndex]) return;
+		long fence = data.presentFences[imageIndex];
+		check(vkWaitForFences(device, fence, true, -1L), "vkWaitForFences(present-image)");
+		check(vkResetFences(device, fence), "vkResetFences(present-image)");
+		data.presentFenceLive[imageIndex] = false;
+	}
+
+	private void waitForPresentRetirement(SwapchainData data)
+	{
+		if (data == null || device == null) return;
 		try (MemoryStack stack = MemoryStack.stackPush())
 		{
-			VkSubmitInfo submit = VkSubmitInfo.calloc(stack).sType$Default()
+			int count = 0;
+			for (boolean live : data.presentFenceLive) if (live) count++;
+			if (count == 0) return;
+			LongBuffer fences = stack.mallocLong(count);
+			for (int index = 0; index < data.presentFences.length; index++)
+				if (data.presentFenceLive[index]) fences.put(data.presentFences[index]);
+			fences.flip();
+			check(vkWaitForFences(device, fences, true, -1L), "vkWaitForFences(present-retirement)");
+			java.util.Arrays.fill(data.presentFenceLive, false);
+		}
+	}
+
+	private void consumeAndReleaseAcquiredImage(FrameResources frame, int imageIndex, boolean frameFenceReset)
+	{
+		if (!frameFenceReset) check(vkResetFences(device, frame.fence), "vkResetFences(acquire-cleanup)");
+		try (MemoryStack stack = MemoryStack.stackPush())
+		{
+			VkSubmitInfo consume = VkSubmitInfo.calloc(stack).sType$Default()
 				.waitSemaphoreCount(1).pWaitSemaphores(stack.longs(frame.acquireSemaphore))
-				.pWaitDstStageMask(stack.ints(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT))
-				.pCommandBuffers(stack.pointers(frame.commandBuffer.address()))
-				.pSignalSemaphores(stack.longs(swapchain.renderFinishedSemaphores[imageIndex]));
-			check(vkQueueSubmit(graphicsQueue, submit, frame.fence), "vkQueueSubmit");
+				.pWaitDstStageMask(stack.ints(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT));
+			check(vkQueueSubmit(graphicsQueue, consume, frame.fence), "vkQueueSubmit(acquire-cleanup)");
+			check(vkWaitForFences(device, frame.fence, true, -1L), "vkWaitForFences(acquire-cleanup)");
+			VkReleaseSwapchainImagesInfoEXT release = VkReleaseSwapchainImagesInfoEXT.calloc(stack).sType$Default()
+				.swapchain(swapchain.handle).pImageIndices(stack.ints(imageIndex));
+			check(EXTSwapchainMaintenance1.vkReleaseSwapchainImagesEXT(device, release), "vkReleaseSwapchainImagesEXT");
 		}
-		long submitNs = System.nanoTime() - submitStart;
-		frame.pending = submittedRecord(frameId, swapchain.width, swapchain.height, uiGenerateNs, uploadNs, encodeNs, submitNs,
-			System.nanoTime() - frameStart + uiGenerateNs);
-		frame.submitted = true;
-		frame.imageIndex = imageIndex;
-		swapchain.imageFences[imageIndex] = frame.fence;
-		counterValues[COUNTER_SUBMITTED]++;
-		counterValues[COUNTER_PRESENT_REQUESTED]++;
-		long inFlight = counterValues[COUNTER_SUBMITTED] - counterValues[COUNTER_COMPLETED];
-		counterValues[COUNTER_MAX_IN_FLIGHT] = Math.max(counterValues[COUNTER_MAX_IN_FLIGHT], inFlight);
-		int present;
-		try (MemoryStack stack = MemoryStack.stackPush())
-		{
-			VkPresentInfoKHR info = VkPresentInfoKHR.calloc(stack).sType$Default()
-				.pWaitSemaphores(stack.longs(swapchain.renderFinishedSemaphores[imageIndex]))
-				.swapchainCount(1).pSwapchains(stack.longs(swapchain.handle)).pImageIndices(stack.ints(imageIndex));
-			present = KHRSwapchain.vkQueuePresentKHR(presentQueue, info);
-		}
-		if (present == VK_ERROR_OUT_OF_DATE_KHR || present == VK_SUBOPTIMAL_KHR) recreatePending = true;
-		else if (present != VK_SUCCESS) { counterValues[COUNTER_COMMAND_ERRORS]++; frame.pending.error = "vkQueuePresentKHR:" + present; }
-		frameCursor = (frameCursor + 1) % FRAME_COUNT;
-		return VulkanFrameOutcome.SUBMITTED;
+	}
+
+	private static boolean presentationWasEnqueued(int result)
+	{
+		return result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR || result == VK_ERROR_OUT_OF_DATE_KHR ||
+			result == KHRSurface.VK_ERROR_SURFACE_LOST_KHR ||
+			result == EXTFullScreenExclusive.VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT;
+	}
+
+	private static String message(Throwable failure)
+	{
+		String value = failure.getMessage();
+		return value == null ? failure.getClass().getSimpleName() : value;
 	}
 
 	@Override
@@ -293,9 +412,19 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 		counterValues[COUNTER_SKIPPED_SUSPENDED]++;
 		if (device != null && swapchain != null)
 		{
-			check(vkDeviceWaitIdle(device), "vkDeviceWaitIdle(suspend)");
-			finishAllFrames();
-			destroySwapchain();
+			try
+			{
+				finishAllFrames();
+				waitForPresentRetirement(swapchain);
+				destroySwapchain();
+			}
+			catch (RuntimeException | Error ex)
+			{
+				counterValues[COUNTER_COMMAND_ERRORS]++;
+				accepting = false;
+				failedFrame(frameId, 0, 0, 0, VulkanFrameOutcome.ERROR, message(ex));
+				throw ex;
+			}
 		}
 		recreatePending = true;
 		return failedFrame(frameId, 0, 0, 0, VulkanFrameOutcome.SKIPPED_SUSPENDED, null);
@@ -331,26 +460,80 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 	{
 		if (finalCounters == null || finalCounters.length != VulkanControlCounters.FIELD_COUNT)
 			throw new IllegalArgumentException("Final Vulkan counter storage has the wrong length.");
-		if (consumed || !accepting) throw new IllegalStateException("Vulkan control renderer is already closed.");
-		if (device != null) check(vkDeviceWaitIdle(device), "vkDeviceWaitIdle(close)");
+		if (consumed) throw new IllegalStateException("Vulkan control renderer is already closed.");
 		accepting = false;
 		consumed = true;
-		finishAllFrames();
-		destroySwapchain();
-		destroyCommandResources();
-		if (device != null) { vkDestroyDevice(device, null); device = null; trackRelease(); }
-		if (surface != NULL && instance != null) { KHRSurface.vkDestroySurfaceKHR(instance, surface, null); surface = NULL; trackRelease(); }
-		if (debugMessenger != NULL && instance != null) { EXTDebugUtils.vkDestroyDebugUtilsMessengerEXT(instance, debugMessenger, null); debugMessenger = NULL; trackRelease(); }
-		if (debugCallback != null) { debugCallback.free(); debugCallback = null; }
-		if (instance != null) { vkDestroyInstance(instance, null); instance = null; trackRelease(); }
-		if (loaderCreated) { VK.destroy(); loaderCreated = false; }
+		Throwable failure = null;
+		failure = cleanup(failure, () -> failureInjector.check("close-after-consumption"));
+		failure = cleanup(failure, this::finishAllFrames);
+		failure = cleanup(failure, () -> waitForPresentRetirement(swapchain));
+		failure = cleanup(failure, () ->
+		{
+			if (device != null) check(vkDeviceWaitIdle(device), "vkDeviceWaitIdle(close)");
+		});
+		failure = cleanup(failure, this::destroySwapchain);
+		failure = cleanup(failure, this::destroyCommandResources);
+		failure = cleanup(failure, () ->
+		{
+			if (device != null) { vkDestroyDevice(device, null); device = null; trackRelease(); }
+		});
+		failure = cleanup(failure, () ->
+		{
+			if (surface != NULL && instance != null)
+			{
+				KHRSurface.vkDestroySurfaceKHR(instance, surface, null);
+				surface = NULL;
+				trackRelease();
+			}
+		});
+		failure = cleanup(failure, () ->
+		{
+			if (debugMessenger != NULL && instance != null)
+			{
+				EXTDebugUtils.vkDestroyDebugUtilsMessengerEXT(instance, debugMessenger, null);
+				debugMessenger = NULL;
+				trackRelease();
+			}
+		});
+		failure = cleanup(failure, () ->
+		{
+			if (debugCallback != null) { debugCallback.free(); debugCallback = null; }
+		});
+		failure = cleanup(failure, () ->
+		{
+			if (instance != null) { vkDestroyInstance(instance, null); instance = null; trackRelease(); }
+		});
+		failure = cleanup(failure, () ->
+		{
+			if (loaderCreated) { VK.destroy(); loaderCreated = false; }
+		});
 		ready = false;
 		String error = initializationError;
 		if (error == null && (counterValues[COUNTER_INIT_ERRORS] != 0 || counterValues[COUNTER_SHADER_ERRORS] != 0 ||
-			counterValues[COUNTER_PIPELINE_ERRORS] != 0 || counterValues[COUNTER_COMMAND_ERRORS] != 0)) error = "renderer-errors";
-		timingLog.runEnd(requestedMode, effectiveMode, counterValues, error);
-		timingLog.close();
+			counterValues[COUNTER_PIPELINE_ERRORS] != 0 || counterValues[COUNTER_COMMAND_ERRORS] != 0 ||
+			counterValues[COUNTER_VALIDATION_ERRORS] != 0 || counterValues[COUNTER_TIMESTAMP_QUERY_ERRORS] != 0))
+			error = "renderer-errors";
+		if (error == null && failure != null) error = "teardown-errors";
+		final String runError = error;
+		failure = cleanup(failure, () -> timingLog.runEnd(requestedMode, effectiveMode, counterValues, runError));
+		failure = cleanup(failure, timingLog::close);
 		System.arraycopy(counterValues, 0, finalCounters, 0, counterValues.length);
+		if (failure != null) throw new VulkanBackendCloseException("Vulkan teardown failed after backend ownership was consumed.",
+			failure, true);
+	}
+
+	private static Throwable cleanup(Throwable failure, Runnable action)
+	{
+		try
+		{
+			action.run();
+		}
+		catch (RuntimeException | Error ex)
+		{
+			if (failure == null) return ex;
+			failure.addSuppressed(ex);
+		}
+		return failure;
 	}
 
 	private void createLoader()
@@ -369,14 +552,18 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 	{
 		instanceExtensions = enumerateInstanceExtensions();
 		require(instanceExtensions, KHRSurface.VK_KHR_SURFACE_EXTENSION_NAME);
+		require(instanceExtensions, KHRGetSurfaceCapabilities2.VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
 		require(instanceExtensions, EXTMetalSurface.VK_EXT_METAL_SURFACE_EXTENSION_NAME);
+		require(instanceExtensions, EXTSurfaceMaintenance1.VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME);
 		require(instanceExtensions, KHRPortabilityEnumeration.VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
 		List<String> layers = enumerateInstanceLayers();
 		validationEnabled = validationRequested && layers.contains("VK_LAYER_KHRONOS_validation");
 		debugUtilsEnabled = validationRequested && instanceExtensions.contains(EXTDebugUtils.VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 		List<String> enabledExtensions = new ArrayList<>();
 		enabledExtensions.add(KHRSurface.VK_KHR_SURFACE_EXTENSION_NAME);
+		enabledExtensions.add(KHRGetSurfaceCapabilities2.VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
 		enabledExtensions.add(EXTMetalSurface.VK_EXT_METAL_SURFACE_EXTENSION_NAME);
+		enabledExtensions.add(EXTSurfaceMaintenance1.VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME);
 		enabledExtensions.add(KHRPortabilityEnumeration.VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
 		if (debugUtilsEnabled) enabledExtensions.add(EXTDebugUtils.VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 		try (MemoryStack stack = MemoryStack.stackPush())
@@ -403,7 +590,8 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 		{
 			String message = VkDebugUtilsMessengerCallbackDataEXT.create(callbackData).pMessageString();
 			System.err.println("[vulkan-validation] " + message);
-			if ((severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0) counterValues[COUNTER_COMMAND_ERRORS]++;
+			if ((severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0) counterValues[COUNTER_VALIDATION_ERRORS]++;
+			else if ((severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) != 0) counterValues[COUNTER_VALIDATION_WARNINGS]++;
 			return VK_FALSE;
 		});
 		try (MemoryStack stack = MemoryStack.stackPush())
@@ -451,6 +639,7 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 					presentQueueFamily = support.presentFamily;
 					deviceExtensions = support.extensions;
 					portabilitySubset = deviceExtensions.contains("VK_KHR_portability_subset");
+					swapchainMaintenance1 = true;
 					physicalDeviceName = support.name;
 					timestampValidBits = support.timestampValidBits;
 					timestampPeriodNs = support.timestampPeriodNs;
@@ -466,8 +655,14 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 	{
 		List<String> extensions = enumerateDeviceExtensions(candidate);
 		if (!extensions.contains(KHRSwapchain.VK_KHR_SWAPCHAIN_EXTENSION_NAME)) return null;
+		if (!extensions.contains(EXTSwapchainMaintenance1.VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME)) return null;
 		try (MemoryStack stack = MemoryStack.stackPush())
 		{
+			VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT maintenance =
+				VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT.calloc(stack).sType$Default();
+			VkPhysicalDeviceFeatures2 features = VkPhysicalDeviceFeatures2.calloc(stack).sType$Default().pNext(maintenance);
+			org.lwjgl.vulkan.VK11.vkGetPhysicalDeviceFeatures2(candidate, features);
+			if (!maintenance.swapchainMaintenance1()) return null;
 			VkPhysicalDeviceProperties properties = VkPhysicalDeviceProperties.malloc(stack);
 			vkGetPhysicalDeviceProperties(candidate, properties);
 			if (properties.apiVersion() < VK_MAKE_API_VERSION(0, 1, 2, 0)) return null;
@@ -500,7 +695,8 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 		SurfaceSupport support = querySurfaceSupport(candidate);
 		boolean bgra = false;
 		boolean fifo = false;
-		for (SurfaceFormat format : support.formats) if (format.format == VK_FORMAT_B8G8R8A8_UNORM) bgra = true;
+		for (SurfaceFormat format : support.formats)
+			if (format.format == VK_FORMAT_B8G8R8A8_UNORM && format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) bgra = true;
 		for (int mode : support.presentModes) if (mode == VK_PRESENT_MODE_FIFO_KHR) fifo = true;
 		return bgra && fifo;
 	}
@@ -512,6 +708,7 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 		families.add(presentQueueFamily);
 		List<String> enabledExtensions = new ArrayList<>();
 		enabledExtensions.add(KHRSwapchain.VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+		enabledExtensions.add(EXTSwapchainMaintenance1.VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME);
 		if (portabilitySubset) enabledExtensions.add("VK_KHR_portability_subset");
 		try (MemoryStack stack = MemoryStack.stackPush())
 		{
@@ -522,7 +719,9 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 				FloatBuffer priority = stack.floats(1.0f);
 				queues.get(index++).sType$Default().queueFamilyIndex(family).pQueuePriorities(priority);
 			}
-			VkDeviceCreateInfo info = VkDeviceCreateInfo.calloc(stack).sType$Default()
+			VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT maintenance =
+				VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT.calloc(stack).sType$Default().swapchainMaintenance1(true);
+			VkDeviceCreateInfo info = VkDeviceCreateInfo.calloc(stack).sType$Default().pNext(maintenance)
 				.pQueueCreateInfos(queues).ppEnabledExtensionNames(strings(stack, enabledExtensions));
 			PointerBuffer pointer = stack.mallocPointer(1);
 			check(vkCreateDevice(physicalDevice, info, null, pointer), "vkCreateDevice");
@@ -550,13 +749,18 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 				.commandPool(commandPool).level(VK_COMMAND_BUFFER_LEVEL_PRIMARY).commandBufferCount(FRAME_COUNT);
 			PointerBuffer buffers = stack.mallocPointer(FRAME_COUNT);
 			check(vkAllocateCommandBuffers(device, allocate, buffers), "vkAllocateCommandBuffers");
-			VkSemaphoreCreateInfo semaphore = VkSemaphoreCreateInfo.calloc(stack).sType$Default();
-			VkFenceCreateInfo fence = VkFenceCreateInfo.calloc(stack).sType$Default().flags(VK_FENCE_CREATE_SIGNALED_BIT);
 			for (int index = 0; index < FRAME_COUNT; index++)
 			{
 				FrameResources frame = new FrameResources();
 				frame.commandBuffer = new VkCommandBuffer(buffers.get(index), device);
+				frames[index] = frame;
 				trackCreate();
+			}
+			VkSemaphoreCreateInfo semaphore = VkSemaphoreCreateInfo.calloc(stack).sType$Default();
+			VkFenceCreateInfo fence = VkFenceCreateInfo.calloc(stack).sType$Default().flags(VK_FENCE_CREATE_SIGNALED_BIT);
+			for (int index = 0; index < FRAME_COUNT; index++)
+			{
+				FrameResources frame = frames[index];
 				check(vkCreateSemaphore(device, semaphore, null, handle), "vkCreateSemaphore(acquire)");
 				frame.acquireSemaphore = handle.get(0); trackCreate();
 				check(vkCreateFence(device, fence, null, handle), "vkCreateFence");
@@ -568,7 +772,6 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 					check(vkCreateQueryPool(device, query, null, handle), "vkCreateQueryPool");
 					frame.queryPool = handle.get(0); trackCreate();
 				}
-				frames[index] = frame;
 			}
 		}
 	}
@@ -591,8 +794,14 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 	{
 		SurfaceSupport support = querySurfaceSupport(physicalDevice);
 		SurfaceFormat selectedFormat = null;
-		for (SurfaceFormat format : support.formats) if (format.format == VK_FORMAT_B8G8R8A8_UNORM) { selectedFormat = format; break; }
-		if (selectedFormat == null) throw new IllegalStateException("VK_FORMAT_B8G8R8A8_UNORM is not advertised for the Metal surface.");
+		for (SurfaceFormat format : support.formats)
+			if (format.format == VK_FORMAT_B8G8R8A8_UNORM && format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
+			{
+				selectedFormat = format;
+				break;
+			}
+		if (selectedFormat == null) throw new IllegalStateException(
+			"VK_FORMAT_B8G8R8A8_UNORM with VK_COLOR_SPACE_SRGB_NONLINEAR_KHR is not advertised for the Metal surface.");
 		List<Integer> modes = new ArrayList<>();
 		for (int mode : support.presentModes) modes.add(mode);
 		SwapchainSelection selection = SwapchainSelection.choose(support.minImages, support.maxImages,
@@ -608,6 +817,7 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 		data.colorSpace = selectedFormat.colorSpace;
 		data.requestedImages = selection.requestedImageCount();
 		data.presentMode = selection.effectivePresentMode();
+		swapchain = data;
 		try (MemoryStack stack = MemoryStack.stackPush())
 		{
 			VkSwapchainCreateInfoKHR info = VkSwapchainCreateInfoKHR.calloc(stack).sType$Default()
@@ -633,12 +843,13 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 			for (int index = 0; index < data.images.length; index++) data.images[index] = images.get(index);
 		}
 		createSwapchainObjects(data);
-		swapchain = data;
 		effectiveMode = data.presentMode;
 		if (effectiveMode != requestedMode) counterValues[COUNTER_PRESENT_MODE_DIVERGENCES]++;
 		generation++;
 		VulkanTimingLog.CapabilityRecord capability = new VulkanTimingLog.CapabilityRecord();
 		capability.portabilitySubset = portabilitySubset;
+		capability.swapchainMaintenance1 = swapchainMaintenance1;
+		capability.presentationFences = swapchainMaintenance1;
 		capability.colorSpace = colorSpaceName(data.colorSpace);
 		capability.requestedImages = data.requestedImages;
 		capability.actualImages = data.images.length;
@@ -658,9 +869,10 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 
 	private void recreateSwapchain(int width, int height)
 	{
-		check(vkDeviceWaitIdle(device), "vkDeviceWaitIdle(recreate)");
 		finishAllFrames();
+		waitForPresentRetirement(swapchain);
 		destroySwapchain();
+		failureInjector.check("during-recreate");
 		createSwapchain(width, height);
 		counterValues[COUNTER_RESIZE_REBUILDS]++;
 		recreatePending = false;
@@ -669,6 +881,7 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 	private void createSwapchainObjects(SwapchainData data)
 	{
 		createImageViews(data);
+		failureInjector.check("partial-swapchain-children");
 		createRenderPass(data);
 		createDescriptorLayout(data);
 		createPipelineLayout(data);
@@ -676,7 +889,7 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 		createFramebuffers(data);
 		createSampler(data);
 		createFrameUiResources(data);
-		createRenderFinishedSemaphores(data);
+		createPresentationResources(data);
 		data.imageFences = new long[data.images.length];
 	}
 
@@ -684,19 +897,41 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 	{
 		SwapchainData data = swapchain;
 		if (data == null || device == null) return;
-		for (FrameResources frame : frames) destroyUiResources(frame);
-		if (data.descriptorPool != NULL) { vkDestroyDescriptorPool(device, data.descriptorPool, null); trackRelease(data.descriptorSetCount + 1); }
-		if (data.sampler != NULL) { vkDestroySampler(device, data.sampler, null); trackRelease(); }
-		if (data.trianglePipeline != NULL) { vkDestroyPipeline(device, data.trianglePipeline, null); trackRelease(); }
-		if (data.uiPipeline != NULL) { vkDestroyPipeline(device, data.uiPipeline, null); trackRelease(); }
-		if (data.pipelineLayout != NULL) { vkDestroyPipelineLayout(device, data.pipelineLayout, null); trackRelease(); }
-		if (data.descriptorLayout != NULL) { vkDestroyDescriptorSetLayout(device, data.descriptorLayout, null); trackRelease(); }
-		for (long framebuffer : data.framebuffers) { vkDestroyFramebuffer(device, framebuffer, null); trackRelease(); }
-		if (data.renderPass != NULL) { vkDestroyRenderPass(device, data.renderPass, null); trackRelease(); }
-		for (long view : data.imageViews) { vkDestroyImageView(device, view, null); trackRelease(); }
-		for (long semaphore : data.renderFinishedSemaphores) { vkDestroySemaphore(device, semaphore, null); trackRelease(); }
-		if (data.handle != NULL) { KHRSwapchain.vkDestroySwapchainKHR(device, data.handle, null); trackRelease(); }
 		swapchain = null;
+		for (FrameResources frame : frames) destroyUiResources(frame);
+		if (data.descriptorPool != NULL)
+		{
+			vkDestroyDescriptorPool(device, data.descriptorPool, null);
+			data.descriptorPool = NULL;
+			trackRelease(data.descriptorSetCount + 1);
+			data.descriptorSetCount = 0;
+		}
+		if (data.sampler != NULL) { vkDestroySampler(device, data.sampler, null); data.sampler = NULL; trackRelease(); }
+		if (data.trianglePipeline != NULL) { vkDestroyPipeline(device, data.trianglePipeline, null); data.trianglePipeline = NULL; trackRelease(); }
+		if (data.uiPipeline != NULL) { vkDestroyPipeline(device, data.uiPipeline, null); data.uiPipeline = NULL; trackRelease(); }
+		if (data.pipelineLayout != NULL) { vkDestroyPipelineLayout(device, data.pipelineLayout, null); data.pipelineLayout = NULL; trackRelease(); }
+		if (data.descriptorLayout != NULL) { vkDestroyDescriptorSetLayout(device, data.descriptorLayout, null); data.descriptorLayout = NULL; trackRelease(); }
+		for (int index = 0; index < data.framebuffers.length; index++) if (data.framebuffers[index] != NULL)
+		{
+			vkDestroyFramebuffer(device, data.framebuffers[index], null); data.framebuffers[index] = NULL; trackRelease();
+		}
+		if (data.renderPass != NULL) { vkDestroyRenderPass(device, data.renderPass, null); data.renderPass = NULL; trackRelease(); }
+		for (int index = 0; index < data.imageViews.length; index++) if (data.imageViews[index] != NULL)
+		{
+			vkDestroyImageView(device, data.imageViews[index], null); data.imageViews[index] = NULL; trackRelease();
+		}
+		for (int index = 0; index < data.renderFinishedSemaphores.length; index++)
+			if (data.renderFinishedSemaphores[index] != NULL)
+			{
+				vkDestroySemaphore(device, data.renderFinishedSemaphores[index], null);
+				data.renderFinishedSemaphores[index] = NULL;
+				trackRelease();
+			}
+		for (int index = 0; index < data.presentFences.length; index++) if (data.presentFences[index] != NULL)
+		{
+			vkDestroyFence(device, data.presentFences[index], null); data.presentFences[index] = NULL; trackRelease();
+		}
+		if (data.handle != NULL) { KHRSwapchain.vkDestroySwapchainKHR(device, data.handle, null); data.handle = NULL; trackRelease(); }
 	}
 
 	private SurfaceSupport querySurfaceSupport(VkPhysicalDevice candidate)
@@ -774,6 +1009,32 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 		}
 	}
 
+	private long createOffscreenRenderPass(int format)
+	{
+		try (MemoryStack stack = MemoryStack.stackPush())
+		{
+			VkAttachmentDescription.Buffer attachment = VkAttachmentDescription.calloc(1, stack);
+			attachment.get(0).format(format).samples(VK_SAMPLE_COUNT_1_BIT).loadOp(VK_ATTACHMENT_LOAD_OP_CLEAR)
+				.storeOp(VK_ATTACHMENT_STORE_OP_STORE).stencilLoadOp(VK_ATTACHMENT_LOAD_OP_DONT_CARE)
+				.stencilStoreOp(VK_ATTACHMENT_STORE_OP_DONT_CARE).initialLayout(VK_IMAGE_LAYOUT_UNDEFINED)
+				.finalLayout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+			VkAttachmentReference.Buffer color = VkAttachmentReference.calloc(1, stack);
+			color.get(0).attachment(0).layout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+			VkSubpassDescription.Buffer subpass = VkSubpassDescription.calloc(1, stack);
+			subpass.get(0).pipelineBindPoint(VK_PIPELINE_BIND_POINT_GRAPHICS).colorAttachmentCount(1).pColorAttachments(color);
+			VkSubpassDependency.Buffer dependencies = VkSubpassDependency.calloc(1, stack);
+			dependencies.get(0).srcSubpass(VK_SUBPASS_EXTERNAL).dstSubpass(0)
+				.srcStageMask(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT).dstStageMask(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)
+				.dstAccessMask(VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+			VkRenderPassCreateInfo info = VkRenderPassCreateInfo.calloc(stack).sType$Default()
+				.pAttachments(attachment).pSubpasses(subpass).pDependencies(dependencies);
+			LongBuffer handle = stack.mallocLong(1);
+			check(vkCreateRenderPass(device, info, null, handle), "vkCreateRenderPass(readback)");
+			trackCreate();
+			return handle.get(0);
+		}
+	}
+
 	private void createDescriptorLayout(SwapchainData data)
 	{
 		try (MemoryStack stack = MemoryStack.stackPush())
@@ -810,48 +1071,53 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 
 	private long createPipeline(SwapchainData data, String vertexResource, String fragmentResource, boolean blend)
 	{
-		long vertex = createShaderModule(vertexResource);
-		long fragment = createShaderModule(fragmentResource);
-		try (MemoryStack stack = MemoryStack.stackPush())
+		long vertex = NULL;
+		long fragment = NULL;
+		try
 		{
-			ByteBuffer main = stack.UTF8("main");
-			VkPipelineShaderStageCreateInfo.Buffer stages = VkPipelineShaderStageCreateInfo.calloc(2, stack);
-			stages.get(0).sType$Default().stage(VK_SHADER_STAGE_VERTEX_BIT).module(vertex).pName(main);
-			stages.get(1).sType$Default().stage(VK_SHADER_STAGE_FRAGMENT_BIT).module(fragment).pName(main);
-			VkPipelineVertexInputStateCreateInfo vertexInput = VkPipelineVertexInputStateCreateInfo.calloc(stack).sType$Default();
-			VkPipelineInputAssemblyStateCreateInfo assembly = VkPipelineInputAssemblyStateCreateInfo.calloc(stack).sType$Default()
-				.topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
-			VkPipelineViewportStateCreateInfo viewport = VkPipelineViewportStateCreateInfo.calloc(stack).sType$Default()
-				.viewportCount(1).scissorCount(1);
-			VkPipelineRasterizationStateCreateInfo raster = VkPipelineRasterizationStateCreateInfo.calloc(stack).sType$Default()
-				.depthClampEnable(false).rasterizerDiscardEnable(false).polygonMode(VK_POLYGON_MODE_FILL).cullMode(VK_CULL_MODE_NONE)
-				.frontFace(VK_FRONT_FACE_COUNTER_CLOCKWISE).lineWidth(1.0f);
-			VkPipelineMultisampleStateCreateInfo multisample = VkPipelineMultisampleStateCreateInfo.calloc(stack).sType$Default()
-				.rasterizationSamples(VK_SAMPLE_COUNT_1_BIT);
-			VkPipelineColorBlendAttachmentState.Buffer attachment = VkPipelineColorBlendAttachmentState.calloc(1, stack);
-			attachment.get(0).colorWriteMask(VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
-				VK_COLOR_COMPONENT_A_BIT).blendEnable(blend);
-			if (blend) attachment.get(0).srcColorBlendFactor(VK_BLEND_FACTOR_ONE).dstColorBlendFactor(VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA)
-				.colorBlendOp(VK_BLEND_OP_ADD).srcAlphaBlendFactor(VK_BLEND_FACTOR_ONE)
-				.dstAlphaBlendFactor(VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA).alphaBlendOp(VK_BLEND_OP_ADD);
-			VkPipelineColorBlendStateCreateInfo colorBlend = VkPipelineColorBlendStateCreateInfo.calloc(stack).sType$Default()
-				.pAttachments(attachment);
-			VkPipelineDynamicStateCreateInfo dynamic = VkPipelineDynamicStateCreateInfo.calloc(stack).sType$Default()
-				.pDynamicStates(stack.ints(VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR));
-			VkGraphicsPipelineCreateInfo.Buffer pipeline = VkGraphicsPipelineCreateInfo.calloc(1, stack);
-			pipeline.get(0).sType$Default().pStages(stages).pVertexInputState(vertexInput).pInputAssemblyState(assembly)
-				.pViewportState(viewport).pRasterizationState(raster).pMultisampleState(multisample)
-				.pColorBlendState(colorBlend).pDynamicState(dynamic).layout(data.pipelineLayout).renderPass(data.renderPass).subpass(0);
-			LongBuffer handle = stack.mallocLong(1);
-			int result = vkCreateGraphicsPipelines(device, NULL, pipeline, null, handle);
-			if (result != VK_SUCCESS) { counterValues[COUNTER_PIPELINE_ERRORS]++; throw failure("vkCreateGraphicsPipelines", result); }
-			trackCreate();
-			return handle.get(0);
+			vertex = createShaderModule(vertexResource);
+			fragment = createShaderModule(fragmentResource);
+			try (MemoryStack stack = MemoryStack.stackPush())
+			{
+				ByteBuffer main = stack.UTF8("main");
+				VkPipelineShaderStageCreateInfo.Buffer stages = VkPipelineShaderStageCreateInfo.calloc(2, stack);
+				stages.get(0).sType$Default().stage(VK_SHADER_STAGE_VERTEX_BIT).module(vertex).pName(main);
+				stages.get(1).sType$Default().stage(VK_SHADER_STAGE_FRAGMENT_BIT).module(fragment).pName(main);
+				VkPipelineVertexInputStateCreateInfo vertexInput = VkPipelineVertexInputStateCreateInfo.calloc(stack).sType$Default();
+				VkPipelineInputAssemblyStateCreateInfo assembly = VkPipelineInputAssemblyStateCreateInfo.calloc(stack).sType$Default()
+					.topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+				VkPipelineViewportStateCreateInfo viewport = VkPipelineViewportStateCreateInfo.calloc(stack).sType$Default()
+					.viewportCount(1).scissorCount(1);
+				VkPipelineRasterizationStateCreateInfo raster = VkPipelineRasterizationStateCreateInfo.calloc(stack).sType$Default()
+					.depthClampEnable(false).rasterizerDiscardEnable(false).polygonMode(VK_POLYGON_MODE_FILL).cullMode(VK_CULL_MODE_NONE)
+					.frontFace(VK_FRONT_FACE_COUNTER_CLOCKWISE).lineWidth(1.0f);
+				VkPipelineMultisampleStateCreateInfo multisample = VkPipelineMultisampleStateCreateInfo.calloc(stack).sType$Default()
+					.rasterizationSamples(VK_SAMPLE_COUNT_1_BIT);
+				VkPipelineColorBlendAttachmentState.Buffer attachment = VkPipelineColorBlendAttachmentState.calloc(1, stack);
+				attachment.get(0).colorWriteMask(VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
+					VK_COLOR_COMPONENT_A_BIT).blendEnable(blend);
+				if (blend) attachment.get(0).srcColorBlendFactor(VK_BLEND_FACTOR_ONE).dstColorBlendFactor(VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA)
+					.colorBlendOp(VK_BLEND_OP_ADD).srcAlphaBlendFactor(VK_BLEND_FACTOR_ONE)
+					.dstAlphaBlendFactor(VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA).alphaBlendOp(VK_BLEND_OP_ADD);
+				VkPipelineColorBlendStateCreateInfo colorBlend = VkPipelineColorBlendStateCreateInfo.calloc(stack).sType$Default()
+					.pAttachments(attachment);
+				VkPipelineDynamicStateCreateInfo dynamic = VkPipelineDynamicStateCreateInfo.calloc(stack).sType$Default()
+					.pDynamicStates(stack.ints(VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR));
+				VkGraphicsPipelineCreateInfo.Buffer pipeline = VkGraphicsPipelineCreateInfo.calloc(1, stack);
+				pipeline.get(0).sType$Default().pStages(stages).pVertexInputState(vertexInput).pInputAssemblyState(assembly)
+					.pViewportState(viewport).pRasterizationState(raster).pMultisampleState(multisample)
+					.pColorBlendState(colorBlend).pDynamicState(dynamic).layout(data.pipelineLayout).renderPass(data.renderPass).subpass(0);
+				LongBuffer handle = stack.mallocLong(1);
+				int result = vkCreateGraphicsPipelines(device, NULL, pipeline, null, handle);
+				if (result != VK_SUCCESS) { counterValues[COUNTER_PIPELINE_ERRORS]++; throw failure("vkCreateGraphicsPipelines", result); }
+				trackCreate();
+				return handle.get(0);
+			}
 		}
 		finally
 		{
-			vkDestroyShaderModule(device, fragment, null); trackRelease();
-			vkDestroyShaderModule(device, vertex, null); trackRelease();
+			if (fragment != NULL) { vkDestroyShaderModule(device, fragment, null); trackRelease(); }
+			if (vertex != NULL) { vkDestroyShaderModule(device, vertex, null); trackRelease(); }
 		}
 	}
 
@@ -949,17 +1215,22 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 		}
 	}
 
-	private void createRenderFinishedSemaphores(SwapchainData data)
+	private void createPresentationResources(SwapchainData data)
 	{
 		data.renderFinishedSemaphores = new long[data.images.length];
+		data.presentFences = new long[data.images.length];
+		data.presentFenceLive = new boolean[data.images.length];
 		try (MemoryStack stack = MemoryStack.stackPush())
 		{
 			VkSemaphoreCreateInfo info = VkSemaphoreCreateInfo.calloc(stack).sType$Default();
+			VkFenceCreateInfo fence = VkFenceCreateInfo.calloc(stack).sType$Default();
 			LongBuffer handle = stack.mallocLong(1);
 			for (int index = 0; index < data.images.length; index++)
 			{
 				check(vkCreateSemaphore(device, info, null, handle), "vkCreateSemaphore(present)");
 				data.renderFinishedSemaphores[index] = handle.get(0); trackCreate();
+				check(vkCreateFence(device, fence, null, handle), "vkCreateFence(present)");
+				data.presentFences[index] = handle.get(0); trackCreate();
 			}
 		}
 	}
@@ -978,6 +1249,7 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 	{
 		BufferResource resource = new BufferResource();
 		resource.size = size;
+		boolean complete = false;
 		try (MemoryStack stack = MemoryStack.stackPush())
 		{
 			VkBufferCreateInfo info = VkBufferCreateInfo.calloc(stack).sType$Default().size(size)
@@ -992,6 +1264,11 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 			check(vkAllocateMemory(device, allocate, null, handle), "vkAllocateMemory(buffer)");
 			resource.memory = handle.get(0); trackCreate();
 			check(vkBindBufferMemory(device, resource.buffer, resource.memory, 0), "vkBindBufferMemory");
+			complete = true;
+		}
+		finally
+		{
+			if (!complete) destroyBuffer(resource);
 		}
 		return resource;
 	}
@@ -1002,6 +1279,7 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 		resource.width = width;
 		resource.height = height;
 		resource.format = format;
+		boolean complete = false;
 		try (MemoryStack stack = MemoryStack.stackPush())
 		{
 			VkImageCreateInfo info = VkImageCreateInfo.calloc(stack).sType$Default().imageType(VK_IMAGE_TYPE_2D)
@@ -1028,6 +1306,11 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 				check(vkCreateImageView(device, imageView, null, handle), "vkCreateImageView");
 				resource.view = handle.get(0); trackCreate();
 			}
+			complete = true;
+		}
+		finally
+		{
+			if (!complete) destroyImage(resource);
 		}
 		return resource;
 	}
@@ -1035,16 +1318,16 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 	private void destroyBuffer(BufferResource resource)
 	{
 		if (resource == null || device == null) return;
-		if (resource.buffer != NULL) { vkDestroyBuffer(device, resource.buffer, null); trackRelease(); }
-		if (resource.memory != NULL) { vkFreeMemory(device, resource.memory, null); trackRelease(); }
+		if (resource.buffer != NULL) { vkDestroyBuffer(device, resource.buffer, null); resource.buffer = NULL; trackRelease(); }
+		if (resource.memory != NULL) { vkFreeMemory(device, resource.memory, null); resource.memory = NULL; trackRelease(); }
 	}
 
 	private void destroyImage(ImageResource resource)
 	{
 		if (resource == null || device == null) return;
-		if (resource.view != NULL) { vkDestroyImageView(device, resource.view, null); trackRelease(); }
-		if (resource.image != NULL) { vkDestroyImage(device, resource.image, null); trackRelease(); }
-		if (resource.memory != NULL) { vkFreeMemory(device, resource.memory, null); trackRelease(); }
+		if (resource.view != NULL) { vkDestroyImageView(device, resource.view, null); resource.view = NULL; trackRelease(); }
+		if (resource.image != NULL) { vkDestroyImage(device, resource.image, null); resource.image = NULL; trackRelease(); }
+		if (resource.memory != NULL) { vkFreeMemory(device, resource.memory, null); resource.memory = NULL; trackRelease(); }
 	}
 
 	private int findMemoryType(int mask, int properties)
@@ -1184,8 +1467,23 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 					long first = maskTimestamp(values.get(0));
 					long second = maskTimestamp(values.get(1));
 					long delta = timestampDelta(first, second);
-					frame.pending.gpuStartNs = Math.round(first * timestampPeriodNs);
-					frame.pending.gpuEndNs = frame.pending.gpuStartNs + Math.round(delta * timestampPeriodNs);
+					Long startNs = timestampNanoseconds(first);
+					Long durationNs = timestampNanoseconds(delta);
+					if (delta < 0 || startNs == null || durationNs == null || durationNs > Long.MAX_VALUE - startNs)
+					{
+						counterValues[COUNTER_TIMESTAMP_QUERY_ERRORS]++;
+						frame.pending.error = appendError(frame.pending.error, "timestamp-result-out-of-range");
+					}
+					else
+					{
+						frame.pending.gpuStartNs = startNs;
+						frame.pending.gpuEndNs = startNs + durationNs;
+					}
+				}
+				else
+				{
+					counterValues[COUNTER_TIMESTAMP_QUERY_ERRORS]++;
+					frame.pending.error = appendError(frame.pending.error, "vkGetQueryPoolResults:" + query);
 				}
 			}
 		}
@@ -1210,8 +1508,21 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 	private long timestampDelta(long start, long end)
 	{
 		if (end >= start) return end - start;
-		if (timestampValidBits >= 64) return 0;
+		if (timestampValidBits >= 64) return -1;
 		return (1L << timestampValidBits) - start + end;
+	}
+
+	private Long timestampNanoseconds(long ticks)
+	{
+		if (ticks < 0) return null;
+		double value = ticks * timestampPeriodNs;
+		if (!Double.isFinite(value) || value < 0 || value > Long.MAX_VALUE) return null;
+		return Math.round(value);
+	}
+
+	private static String appendError(String existing, String next)
+	{
+		return existing == null ? next : existing + "; " + next;
 	}
 
 	private VulkanTimingLog.FrameRecord submittedRecord(long frameId, int width, int height, long uiGenerateNs,
@@ -1278,43 +1589,52 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 	private ReadbackResources createReadbackResources()
 	{
 		ReadbackResources resources = new ReadbackResources();
-		resources.staging = createBuffer(8 * 8 * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-		resources.outputBuffer = createBuffer(8 * 8 * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-		resources.ui = createImage(8, 8, VK_FORMAT_B8G8R8A8_UNORM, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, true);
-		resources.output = createImage(8, 8, VK_FORMAT_B8G8R8A8_UNORM, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, true);
-		try (MemoryStack stack = MemoryStack.stackPush())
+		try
 		{
-			LongBuffer handle = stack.mallocLong(1);
-			VkFramebufferCreateInfo framebuffer = VkFramebufferCreateInfo.calloc(stack).sType$Default()
-				.renderPass(swapchain.renderPass).pAttachments(stack.longs(resources.output.view)).width(8).height(8).layers(1);
-			check(vkCreateFramebuffer(device, framebuffer, null, handle), "vkCreateFramebuffer(readback)");
-			resources.framebuffer = handle.get(0); trackCreate();
-			VkDescriptorPoolSize.Buffer size = VkDescriptorPoolSize.calloc(1, stack);
-			size.get(0).type(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(1);
-			VkDescriptorPoolCreateInfo pool = VkDescriptorPoolCreateInfo.calloc(stack).sType$Default().maxSets(1).pPoolSizes(size);
-			check(vkCreateDescriptorPool(device, pool, null, handle), "vkCreateDescriptorPool(readback)");
-			resources.descriptorPool = handle.get(0); trackCreate();
-			VkDescriptorSetAllocateInfo allocate = VkDescriptorSetAllocateInfo.calloc(stack).sType$Default()
-				.descriptorPool(resources.descriptorPool).pSetLayouts(stack.longs(swapchain.descriptorLayout));
-			check(vkAllocateDescriptorSets(device, allocate, handle), "vkAllocateDescriptorSets(readback)");
-			resources.descriptorSet = handle.get(0); trackCreate();
-			VkDescriptorImageInfo.Buffer image = VkDescriptorImageInfo.calloc(1, stack);
-			image.get(0).sampler(swapchain.sampler).imageView(resources.ui.view).imageLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-			VkWriteDescriptorSet.Buffer write = VkWriteDescriptorSet.calloc(1, stack);
-			write.get(0).sType$Default().dstSet(resources.descriptorSet).dstBinding(0)
-				.descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).pImageInfo(image);
-			vkUpdateDescriptorSets(device, write, null);
-			VkCommandBufferAllocateInfo command = VkCommandBufferAllocateInfo.calloc(stack).sType$Default()
-				.commandPool(commandPool).level(VK_COMMAND_BUFFER_LEVEL_PRIMARY).commandBufferCount(1);
-			PointerBuffer pointer = stack.mallocPointer(1);
-			check(vkAllocateCommandBuffers(device, command, pointer), "vkAllocateCommandBuffers(readback)");
-			resources.commandBuffer = new VkCommandBuffer(pointer.get(0), device); trackCreate();
+			resources.staging = createBuffer(8 * 8 * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+			resources.outputBuffer = createBuffer(8 * 8 * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+			resources.ui = createImage(8, 8, VK_FORMAT_B8G8R8A8_UNORM, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, true);
+			resources.output = createImage(8, 8, VK_FORMAT_B8G8R8A8_UNORM, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, true);
+			resources.renderPass = createOffscreenRenderPass(VK_FORMAT_B8G8R8A8_UNORM);
+			try (MemoryStack stack = MemoryStack.stackPush())
+			{
+				LongBuffer handle = stack.mallocLong(1);
+				VkFramebufferCreateInfo framebuffer = VkFramebufferCreateInfo.calloc(stack).sType$Default()
+					.renderPass(resources.renderPass).pAttachments(stack.longs(resources.output.view)).width(8).height(8).layers(1);
+				check(vkCreateFramebuffer(device, framebuffer, null, handle), "vkCreateFramebuffer(readback)");
+				resources.framebuffer = handle.get(0); trackCreate();
+				VkDescriptorPoolSize.Buffer size = VkDescriptorPoolSize.calloc(1, stack);
+				size.get(0).type(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(1);
+				VkDescriptorPoolCreateInfo pool = VkDescriptorPoolCreateInfo.calloc(stack).sType$Default().maxSets(1).pPoolSizes(size);
+				check(vkCreateDescriptorPool(device, pool, null, handle), "vkCreateDescriptorPool(readback)");
+				resources.descriptorPool = handle.get(0); trackCreate();
+				VkDescriptorSetAllocateInfo allocate = VkDescriptorSetAllocateInfo.calloc(stack).sType$Default()
+					.descriptorPool(resources.descriptorPool).pSetLayouts(stack.longs(swapchain.descriptorLayout));
+				check(vkAllocateDescriptorSets(device, allocate, handle), "vkAllocateDescriptorSets(readback)");
+				resources.descriptorSet = handle.get(0); trackCreate();
+				VkDescriptorImageInfo.Buffer image = VkDescriptorImageInfo.calloc(1, stack);
+				image.get(0).sampler(swapchain.sampler).imageView(resources.ui.view).imageLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+				VkWriteDescriptorSet.Buffer write = VkWriteDescriptorSet.calloc(1, stack);
+				write.get(0).sType$Default().dstSet(resources.descriptorSet).dstBinding(0)
+					.descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).pImageInfo(image);
+				vkUpdateDescriptorSets(device, write, null);
+				VkCommandBufferAllocateInfo command = VkCommandBufferAllocateInfo.calloc(stack).sType$Default()
+					.commandPool(commandPool).level(VK_COMMAND_BUFFER_LEVEL_PRIMARY).commandBufferCount(1);
+				PointerBuffer pointer = stack.mallocPointer(1);
+				check(vkAllocateCommandBuffers(device, command, pointer), "vkAllocateCommandBuffers(readback)");
+				resources.commandBuffer = new VkCommandBuffer(pointer.get(0), device); trackCreate();
+			}
+			return resources;
 		}
-		return resources;
+		catch (RuntimeException | Error ex)
+		{
+			destroyReadbackResources(resources);
+			throw ex;
+		}
 	}
 
 	private byte[] runReadbackPass(ReadbackResources resources, byte[] uiBytes, long frameId)
@@ -1332,8 +1652,8 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 			vkCmdCopyBufferToImage(resources.commandBuffer, resources.staging.buffer, resources.ui.image,
 				VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, uiCopy);
 			transitionUiForSampling(resources.commandBuffer, resources.ui);
-			recordScene(resources.commandBuffer, swapchain.renderPass, resources.framebuffer, 8, 8, resources.descriptorSet, frameId, true);
-			imageBarrier(resources.commandBuffer, resources.output.image, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+			recordScene(resources.commandBuffer, resources.renderPass, resources.framebuffer, 8, 8, resources.descriptorSet, frameId, true);
+			imageBarrier(resources.commandBuffer, resources.output.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 				VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
 				VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
 			VkBufferImageCopy.Buffer outputCopy = VkBufferImageCopy.calloc(1, stack);
@@ -1359,9 +1679,16 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 	private void destroyReadbackResources(ReadbackResources resources)
 	{
 		if (resources == null || device == null) return;
-		if (resources.commandBuffer != null) { vkFreeCommandBuffers(device, commandPool, resources.commandBuffer); trackRelease(); }
-		if (resources.descriptorPool != NULL) { vkDestroyDescriptorPool(device, resources.descriptorPool, null); trackRelease(2); }
-		if (resources.framebuffer != NULL) { vkDestroyFramebuffer(device, resources.framebuffer, null); trackRelease(); }
+		if (resources.commandBuffer != null) { vkFreeCommandBuffers(device, commandPool, resources.commandBuffer); resources.commandBuffer = null; trackRelease(); }
+		if (resources.descriptorPool != NULL)
+		{
+			vkDestroyDescriptorPool(device, resources.descriptorPool, null);
+			resources.descriptorPool = NULL;
+			trackRelease(resources.descriptorSet == NULL ? 1 : 2);
+			resources.descriptorSet = NULL;
+		}
+		if (resources.framebuffer != NULL) { vkDestroyFramebuffer(device, resources.framebuffer, null); resources.framebuffer = NULL; trackRelease(); }
+		if (resources.renderPass != NULL) { vkDestroyRenderPass(device, resources.renderPass, null); resources.renderPass = NULL; trackRelease(); }
 		destroyImage(resources.output);
 		destroyImage(resources.ui);
 		destroyBuffer(resources.outputBuffer);
@@ -1559,6 +1886,8 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 		long[] imageViews = new long[0];
 		long[] framebuffers = new long[0];
 		long[] renderFinishedSemaphores = new long[0];
+		long[] presentFences = new long[0];
+		boolean[] presentFenceLive = new boolean[0];
 		long[] imageFences = new long[0];
 		long renderPass;
 		long descriptorLayout;
@@ -1595,6 +1924,7 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 		ImageResource ui;
 		ImageResource output;
 		long framebuffer;
+		long renderPass;
 		long descriptorPool;
 		long descriptorSet;
 		VkCommandBuffer commandBuffer;

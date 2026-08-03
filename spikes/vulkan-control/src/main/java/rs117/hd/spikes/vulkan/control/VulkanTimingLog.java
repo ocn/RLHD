@@ -17,7 +17,8 @@ final class VulkanTimingLog implements AutoCloseable
 		"present_requested", "nil_drawable", "skipped_suspended", "skipped_in_flight", "ui_upload_bytes",
 		"resize_rebuilds", "device_rebuilds", "live_native_objects", "high_water_native_objects", "max_in_flight",
 		"presentation_callbacks", "presentation_dropped", "presentation_timeouts", "present_mode_divergences",
-		"drawable_acquisition_requests", "drawable_acquisition_completions"
+		"drawable_acquisition_requests", "drawable_acquisition_completions", "validation_warnings", "validation_errors",
+		"timestamp_query_errors"
 	};
 
 	private final Gson gson = new GsonBuilder().serializeNulls().create();
@@ -52,6 +53,8 @@ final class VulkanTimingLog implements AutoCloseable
 		caps.addProperty("portability_enumeration", true);
 		caps.addProperty("metal_surface", true);
 		caps.addProperty("swapchain", true);
+		caps.addProperty("swapchain_maintenance1", capabilities.swapchainMaintenance1);
+		caps.addProperty("presentation_fences", capabilities.presentationFences);
 		caps.addProperty("portability_subset", capabilities.portabilitySubset);
 		caps.addProperty("format", "VK_FORMAT_B8G8R8A8_UNORM");
 		caps.addProperty("color_space", capabilities.colorSpace);
@@ -180,6 +183,8 @@ final class VulkanTimingLog implements AutoCloseable
 	static final class CapabilityRecord
 	{
 		boolean portabilitySubset;
+		boolean swapchainMaintenance1;
+		boolean presentationFences;
 		String colorSpace;
 		int requestedImages;
 		int actualImages;
