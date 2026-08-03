@@ -31,6 +31,131 @@ dependencies {
 	testAnnotationProcessor 'org.projectlombok:lombok:1.18.30'
 }
 
+sourceSets {
+	macSurfaceSpike {
+		java.srcDir 'spikes/macos-surface/src/main/java'
+	}
+	macSurfaceSpikeTest {
+		java.srcDir 'spikes/macos-surface/src/test/java'
+		compileClasspath += sourceSets.macSurfaceSpike.output
+		runtimeClasspath += output + compileClasspath
+	}
+}
+
+configurations {
+	macSurfaceSpikeTestImplementation.extendsFrom testImplementation
+	macSurfaceSpikeTestRuntimeOnly.extendsFrom testRuntimeOnly
+}
+
+def macSurfaceSpikeDir = file('spikes/macos-surface')
+def macSurfaceNativeDir = layout.buildDirectory.dir('spikes/macos-surface/native')
+def macSurfaceNativeLibrary = macSurfaceNativeDir.map { it.file('librlhd_mac_surface.dylib') }
+def macSurfaceNativeTestBinary = macSurfaceNativeDir.map { it.file('surface_state_test') }
+
+tasks.register('buildMacSurfaceNative', Exec) {
+	group = 'verification'
+	description = 'Builds the opt-in arm64 macOS JAWT/CAMetalLayer bridge.'
+	inputs.files(fileTree("${macSurfaceSpikeDir}/src/main/native") {
+		include '**/*.h', '**/*.c', '**/*.m'
+	})
+	outputs.file(macSurfaceNativeLibrary)
+
+	doFirst {
+		if (!System.getProperty('os.name').toLowerCase(java.util.Locale.ROOT).contains('mac')) {
+			throw new GradleException('The macOS surface spike native bridge can only be built on macOS.')
+		}
+		if (!(System.getProperty('os.arch') in ['aarch64', 'arm64'])) {
+			throw new GradleException('The macOS surface spike initially supports only an arm64 Gradle JDK/toolchain.')
+		}
+		def javaHome = file(System.getProperty('java.home'))
+		if (!file("${javaHome}/include/jni.h").isFile() || !file("${javaHome}/include/darwin/jawt_md.h").isFile()) {
+			throw new GradleException("JDK JNI/JAWT headers not found under ${javaHome}; run Gradle with a full arm64 JDK.")
+		}
+		macSurfaceNativeDir.get().asFile.mkdirs()
+		commandLine(
+			'xcrun', 'clang', '-dynamiclib', '-arch', 'arm64', '-mmacosx-version-min=11.0',
+			'-std=c11', '-fobjc-exceptions', '-fblocks', '-Wall', '-Wextra', '-Werror',
+			'-I', file("${javaHome}/include").absolutePath,
+			'-I', file("${javaHome}/include/darwin").absolutePath,
+			'-I', file("${macSurfaceSpikeDir}/src/main/native").absolutePath,
+			file("${macSurfaceSpikeDir}/src/main/native/surface_state.c").absolutePath,
+			file("${macSurfaceSpikeDir}/src/main/native/mac_metal_surface.m").absolutePath,
+			'-framework', 'Cocoa', '-framework', 'QuartzCore', '-framework', 'Metal',
+			'-undefined', 'dynamic_lookup',
+			'-o', macSurfaceNativeLibrary.get().asFile.absolutePath
+		)
+	}
+}
+
+tasks.register('buildMacSurfaceNativeTest', Exec) {
+	group = 'verification'
+	description = 'Builds the deterministic native surface lifecycle harness.'
+	inputs.files(
+		file("${macSurfaceSpikeDir}/src/main/native/surface_state.h"),
+		file("${macSurfaceSpikeDir}/src/main/native/surface_state.c"),
+		file("${macSurfaceSpikeDir}/src/test/native/surface_state_test.c")
+	)
+	outputs.file(macSurfaceNativeTestBinary)
+
+	doFirst {
+		if (!System.getProperty('os.name').toLowerCase(java.util.Locale.ROOT).contains('mac')) {
+			throw new GradleException('The macOS surface spike native harness can only be built on macOS.')
+		}
+		if (!(System.getProperty('os.arch') in ['aarch64', 'arm64'])) {
+			throw new GradleException('The macOS surface spike initially supports only an arm64 Gradle JDK/toolchain.')
+		}
+		macSurfaceNativeDir.get().asFile.mkdirs()
+		commandLine(
+			'xcrun', 'clang', '-arch', 'arm64', '-std=c11', '-Wall', '-Wextra', '-Werror',
+			'-I', file("${macSurfaceSpikeDir}/src/main/native").absolutePath,
+			file("${macSurfaceSpikeDir}/src/main/native/surface_state.c").absolutePath,
+			file("${macSurfaceSpikeDir}/src/test/native/surface_state_test.c").absolutePath,
+			'-o', macSurfaceNativeTestBinary.get().asFile.absolutePath
+		)
+	}
+}
+
+tasks.register('macSurfaceNativeTest', Exec) {
+	group = 'verification'
+	description = 'Runs the deterministic native surface lifecycle harness.'
+	dependsOn tasks.named('buildMacSurfaceNativeTest')
+	commandLine macSurfaceNativeTestBinary.get().asFile.absolutePath
+}
+
+tasks.register('macSurfaceSpikeTest', Test) {
+	group = 'verification'
+	description = 'Runs deterministic Java tests for the opt-in macOS surface spike.'
+	testClassesDirs = sourceSets.macSurfaceSpikeTest.output.classesDirs
+	classpath = sourceSets.macSurfaceSpikeTest.runtimeClasspath
+	exclude '**/*IntegrationTest.class'
+}
+
+tasks.register('macSurfaceIntegrationTest', Test) {
+	group = 'verification'
+	description = 'Runs the opt-in headful macOS JAWT/CAMetalLayer integration test.'
+	dependsOn tasks.named('buildMacSurfaceNative')
+	testClassesDirs = sourceSets.macSurfaceSpikeTest.output.classesDirs
+	classpath = sourceSets.macSurfaceSpikeTest.runtimeClasspath
+	include '**/*IntegrationTest.class'
+	systemProperty 'java.awt.headless', 'false'
+	systemProperty 'rlhd.spike.macos.integration', 'true'
+	systemProperty 'rlhd.spike.macos.library', macSurfaceNativeLibrary.get().asFile.absolutePath
+}
+
+tasks.register('macSurfaceSpikeJar', Jar) {
+	group = BasePlugin.BUILD_GROUP
+	description = 'Builds the opt-in Java-only macOS surface spike artifact.'
+	dependsOn sourceSets.macSurfaceSpike.classesTaskName
+	archiveClassifier.set('mac-surface-spike')
+	from sourceSets.macSurfaceSpike.output
+}
+
+tasks.register('macSurfaceSpikeCheck') {
+	group = 'verification'
+	description = 'Builds and tests the isolated macOS surface spike without opening a window.'
+	dependsOn tasks.named('buildMacSurfaceNative'), tasks.named('macSurfaceNativeTest'), tasks.named('macSurfaceSpikeTest')
+}
+
 def props = new Properties()
 file('runelite-plugin.properties').withInputStream { props.load(it) }
 
