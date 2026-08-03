@@ -24,6 +24,7 @@
  */
 package rs117.hd.renderer.zone;
 
+import java.nio.IntBuffer;
 import javax.annotation.Nullable;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
@@ -216,6 +217,47 @@ public class SceneUploader implements AutoCloseable {
 		var fb = zone.tboF != null ? zoneTboF.setBuffer(zone.tboF.mapped()) : null;
 		assert zone.tboF != null;
 
+		prepareZone(ctx, zone, mzx, mzz, geometry -> {
+			if (vb != null)
+				vb.put(geometry.opaqueVertices());
+			if (ab != null)
+				ab.put(geometry.alphaVertices());
+			if (fb != null)
+				fb.put(geometry.faceMetadata());
+		});
+	}
+
+	public void prepareZone(
+		ZoneSceneContext ctx,
+		Zone zone,
+		int mzx,
+		int mzz,
+		ZoneGeometrySink sink
+	) throws InterruptedException {
+		IntBuffer opaque = zone.sizeO > 0 ? IntBuffer.allocate(zone.sizeO * Zone.VERT_SIZE * 3 / Integer.BYTES) : null;
+		IntBuffer alpha = zone.sizeA > 0 ? IntBuffer.allocate(zone.sizeA * Zone.VERT_SIZE * 3 / Integer.BYTES) : null;
+		IntBuffer faces = IntBuffer.allocate(zone.sizeF * Zone.TEXTURE_SIZE / Integer.BYTES);
+		uploadZone(
+			ctx,
+			zone,
+			mzx,
+			mzz,
+			opaque != null ? new GpuIntBuffer(opaque) : null,
+			alpha != null ? new GpuIntBuffer(alpha) : null,
+			new GpuIntBuffer(faces)
+		);
+		sink.accept(new PreparedZoneGeometry(opaque, alpha, faces, zone.levelOffsets));
+	}
+
+	private void uploadZone(
+		ZoneSceneContext ctx,
+		Zone zone,
+		int mzx,
+		int mzz,
+		GpuIntBuffer vb,
+		GpuIntBuffer ab,
+		GpuIntBuffer fb
+	) throws InterruptedException {
 		roofIds.length = 0;
 		for (int level = 0; level <= 3; ++level) {
 			for (int xoff = 0; xoff < CHUNK_SIZE; ++xoff) {
