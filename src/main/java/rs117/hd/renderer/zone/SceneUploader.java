@@ -229,15 +229,20 @@ public class SceneUploader implements AutoCloseable {
 		IntBuffer opaque = zone.sizeO > 0 ? IntBuffer.allocate(zone.sizeO * Zone.VERT_SIZE * 3 / Integer.BYTES) : null;
 		IntBuffer alpha = zone.sizeA > 0 ? IntBuffer.allocate(zone.sizeA * Zone.VERT_SIZE * 3 / Integer.BYTES) : null;
 		IntBuffer faces = IntBuffer.allocate(zone.sizeF * Zone.TEXTURE_SIZE / Integer.BYTES);
-		generateZoneGeometry(
-			ctx,
-			zone,
-			mzx,
-			mzz,
-			opaque != null ? new GpuIntBuffer(opaque) : null,
-			alpha != null ? new GpuIntBuffer(alpha) : null,
-			new GpuIntBuffer(faces)
-		);
+		try {
+			generateZoneGeometry(
+				ctx,
+				zone,
+				mzx,
+				mzz,
+				opaque != null ? new GpuIntBuffer(opaque) : null,
+				alpha != null ? new GpuIntBuffer(alpha) : null,
+				new GpuIntBuffer(faces)
+			);
+		} finally {
+			if (writeCache != null)
+				writeCache.detachOutputBuffers();
+		}
 		sink.accept(new PreparedZoneGeometry(opaque, alpha, faces, zone.levelOffsets));
 	}
 

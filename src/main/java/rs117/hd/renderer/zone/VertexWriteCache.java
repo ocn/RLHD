@@ -41,6 +41,14 @@ public final class VertexWriteCache {
 		stagingBuffer = null;
 	}
 
+	private void detachOutputBuffer() {
+		outputBuffer = null;
+		stagingPosition = 0;
+		if (stagingBuffer != null)
+			PooledArrayType.INT.release(stagingBuffer);
+		stagingBuffer = null;
+	}
+
 	private void flushAndGrow() {
 		// Flush buffer and then resize to avoid flushing mid put
 		flush();
@@ -191,6 +199,13 @@ public final class VertexWriteCache {
 			alpha.release();
 			opaqueTex.release();
 			alphaTex.release();
+		}
+
+		void detachOutputBuffers() {
+			opaque.detachOutputBuffer();
+			alpha.detachOutputBuffer();
+			opaqueTex.detachOutputBuffer();
+			alphaTex.detachOutputBuffer();
 		}
 	}
 }

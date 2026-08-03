@@ -8,6 +8,8 @@ import java.nio.ReadOnlyBufferException;
 import java.security.MessageDigest;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import net.runelite.api.Client;
 import net.runelite.api.GameObject;
 import net.runelite.api.Point;
@@ -32,6 +34,8 @@ import static net.runelite.api.Constants.EXTENDED_SCENE_SIZE;
 import static net.runelite.api.Constants.MAX_Z;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -137,6 +141,66 @@ public class PreparedZoneGeometryTest {
 	}
 
 	@Test
+	public void preparationDetachesMutableWriterAliasesBeforePublishing() throws Exception {
+		Fixture fixture = new Fixture();
+		fixture.estimate();
+		PreparedZoneGeometry[] first = new PreparedZoneGeometry[1];
+		fixture.uploader.prepareZone(fixture.context, fixture.zone, 5, 5, geometry -> {
+			assertCacheOutputsDetached(fixture.uploader.writeCache);
+			first[0] = geometry;
+		});
+		assertNotNull(first[0]);
+
+		Zone reusedZone = new Zone();
+		fixture.uploader.estimateZoneSize(fixture.context, reusedZone, 5, 5);
+		fixture.uploader.prepareZone(fixture.context, reusedZone, 5, 5, geometry ->
+			assertCacheOutputsDetached(fixture.uploader.writeCache)
+		);
+		assertArrayEquals(BASE_OPAQUE_VERTICES, remaining(first[0].opaqueVertices()));
+		assertArrayEquals(BASE_FACE_METADATA, remaining(first[0].faceMetadata()));
+		assertEquals(BASE_OPAQUE_SHA256, sha256(remaining(first[0].opaqueVertices())));
+		assertEquals(BASE_FACE_SHA256, sha256(remaining(first[0].faceMetadata())));
+	}
+
+	@Test
+	public void generationFailureDiscardsAndDetachesWriterAliases() throws Exception {
+		Fixture fixture = new Fixture();
+		fixture.estimate();
+		AtomicInteger processedTiles = new AtomicInteger();
+		AtomicBoolean sinkCalled = new AtomicBoolean();
+		fixture.uploader.onBeforeProcessTile = (tile, isEstimate) -> {
+			if (!isEstimate && processedTiles.incrementAndGet() == 2)
+				throw new InterruptedException("generation interrupted");
+		};
+
+		InterruptedException failure = assertThrows(InterruptedException.class, () ->
+			fixture.uploader.prepareZone(fixture.context, fixture.zone, 5, 5, geometry -> sinkCalled.set(true))
+		);
+		assertEquals("generation interrupted", failure.getMessage());
+		assertFalse(sinkCalled.get());
+		assertCacheOutputsDetached(fixture.uploader.writeCache);
+	}
+
+	@Test
+	public void detachDiscardsStagedDataWithoutFlushing() {
+		VertexWriteCache.Collection cache = new VertexWriteCache.Collection();
+		IntBuffer opaque = IntBuffer.allocate(7);
+		IntBuffer alpha = IntBuffer.allocate(7);
+		IntBuffer opaqueFaces = IntBuffer.allocate(9);
+		IntBuffer alphaFaces = IntBuffer.allocate(9);
+		cache.setOutputBuffers(opaque, alpha, opaqueFaces, alphaFaces);
+		cache.opaque.putStaticVertex(1, 2, 3, 0, 0, 0, 0, -1, 0, 0, false);
+
+		cache.detachOutputBuffers();
+
+		assertEquals(0, opaque.position());
+		assertEquals(0, alpha.position());
+		assertEquals(0, opaqueFaces.position());
+		assertEquals(0, alphaFaces.position());
+		assertCacheOutputsDetached(cache);
+	}
+
+	@Test
 	public void sinkFailurePropagatesAfterMetadataGeneration() throws Exception {
 		Fixture fixture = new Fixture();
 		fixture.estimate();
@@ -170,6 +234,24 @@ public class PreparedZoneGeometryTest {
 		assertEquals("[[], [], [], []]", Arrays.deepToString(zone.rids));
 		assertEquals("[[], [], [], []]", Arrays.deepToString(zone.roofStart));
 		assertEquals("[[], [], [], []]", Arrays.deepToString(zone.roofEnd));
+	}
+
+	private static void assertCacheOutputsDetached(VertexWriteCache.Collection cache) {
+		assertNotNull(cache);
+		assertNull(outputBuffer(cache.opaque));
+		assertNull(outputBuffer(cache.alpha));
+		assertNull(outputBuffer(cache.opaqueTex));
+		assertNull(outputBuffer(cache.alphaTex));
+	}
+
+	private static IntBuffer outputBuffer(VertexWriteCache cache) {
+		try {
+			Field field = VertexWriteCache.class.getDeclaredField("outputBuffer");
+			field.setAccessible(true);
+			return (IntBuffer) field.get(cache);
+		} catch (ReflectiveOperationException ex) {
+			throw new AssertionError(ex);
+		}
 	}
 
 	private static void assertFaceMaterialReferences(PreparedZoneGeometry geometry) {
