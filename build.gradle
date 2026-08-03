@@ -50,16 +50,32 @@ sourceSets {
 		compileClasspath += sourceSets.macSurfaceSpike.output + sourceSets.metalControlSpike.output
 		runtimeClasspath += output + compileClasspath + sourceSets.metalControlSpike.runtimeClasspath
 	}
+	vulkanControlSpike {
+		java.srcDir 'spikes/vulkan-control/src/main/java'
+		compileClasspath += sourceSets.macSurfaceSpike.output + sourceSets.metalControlSpike.output
+		runtimeClasspath += output + sourceSets.macSurfaceSpike.output + sourceSets.metalControlSpike.output + compileClasspath
+	}
+	vulkanControlSpikeTest {
+		java.srcDir 'spikes/vulkan-control/src/test/java'
+		compileClasspath += sourceSets.macSurfaceSpike.output + sourceSets.metalControlSpike.output + sourceSets.vulkanControlSpike.output
+		runtimeClasspath += output + compileClasspath + sourceSets.vulkanControlSpike.runtimeClasspath
+	}
 }
 
 configurations {
 	macSurfaceSpikeTestImplementation.extendsFrom testImplementation
 	macSurfaceSpikeTestRuntimeOnly.extendsFrom testRuntimeOnly
 	metalControlSpikeTestImplementation.extendsFrom metalControlSpikeImplementation
+	vulkanControlSpikeTestImplementation.extendsFrom vulkanControlSpikeImplementation
 }
 
 dependencies.add('metalControlSpikeImplementation', 'com.google.code.gson:gson:2.14.0')
 dependencies.add('metalControlSpikeTestImplementation', 'junit:junit:4.13.2')
+dependencies.add('vulkanControlSpikeImplementation', 'com.google.code.gson:gson:2.14.0')
+dependencies.add('vulkanControlSpikeImplementation', 'org.lwjgl:lwjgl:3.3.2')
+dependencies.add('vulkanControlSpikeImplementation', 'org.lwjgl:lwjgl-vulkan:3.3.2')
+dependencies.add('vulkanControlSpikeRuntimeOnly', 'org.lwjgl:lwjgl:3.3.2:natives-macos-arm64')
+dependencies.add('vulkanControlSpikeTestImplementation', 'junit:junit:4.13.2')
 
 def macSurfaceSpikeDir = file('spikes/macos-surface')
 def macSurfaceNativeDir = layout.buildDirectory.dir('spikes/macos-surface/native')
@@ -68,6 +84,52 @@ def macSurfaceNativeTestBinary = macSurfaceNativeDir.map { it.file('surface_stat
 def metalControlSpikeDir = file('spikes/metal-control')
 def metalControlNativeDir = layout.buildDirectory.dir('spikes/metal-control/native')
 def metalControlNativeLibrary = metalControlNativeDir.map { it.file('librlhd_metal_control.dylib') }
+def vulkanControlSpikeDir = file('spikes/vulkan-control')
+def vulkanControlShaderOutputDir = layout.buildDirectory.dir('generated/spikes/vulkan-control/resources')
+def vulkanControlShaderNames = ['triangle.vert', 'triangle.frag', 'ui.vert', 'ui.frag']
+
+sourceSets.vulkanControlSpike.resources.srcDir(vulkanControlShaderOutputDir)
+
+def vulkanControlShaderValidationTasks = []
+vulkanControlShaderNames.each { shaderName ->
+	def taskSuffix = shaderName.split('\\.').collect { it.capitalize() }.join('')
+	def sourceFile = file("${vulkanControlSpikeDir}/src/main/shaders/${shaderName}")
+	def outputFile = vulkanControlShaderOutputDir.map { it.file("shaders/vulkan-control/${shaderName}.spv") }
+	def compileTask = tasks.register("compileVulkanControl${taskSuffix}", Exec) {
+		group = 'build'
+		description = "Compiles ${shaderName} for the opt-in Vulkan control spike."
+		inputs.file(sourceFile)
+		outputs.file(outputFile)
+		doFirst {
+			outputFile.get().asFile.parentFile.mkdirs()
+			def sdk = System.getenv('RLHD_VULKAN_SDK')
+			def validator = sdk == null || sdk.isEmpty() ? 'glslangValidator' : file("${sdk}/bin/glslangValidator").absolutePath
+			commandLine validator, '--target-env', 'vulkan1.2', '-V', sourceFile.absolutePath, '-o', outputFile.get().asFile.absolutePath
+		}
+	}
+	def validateTask = tasks.register("validateVulkanControl${taskSuffix}", Exec) {
+		group = 'verification'
+		description = "Validates compiled ${shaderName} SPIR-V."
+		dependsOn compileTask
+		inputs.file(outputFile)
+		doFirst {
+			def sdk = System.getenv('RLHD_VULKAN_SDK')
+			def validator = sdk == null || sdk.isEmpty() ? 'spirv-val' : file("${sdk}/bin/spirv-val").absolutePath
+			commandLine validator, '--target-env', 'vulkan1.2', outputFile.get().asFile.absolutePath
+		}
+	}
+	vulkanControlShaderValidationTasks.add(validateTask)
+}
+
+tasks.register('validateVulkanControlShaders') {
+	group = 'verification'
+	description = 'Compiles and validates all Vulkan control SPIR-V shaders.'
+	dependsOn vulkanControlShaderValidationTasks
+}
+
+tasks.named(sourceSets.vulkanControlSpike.processResourcesTaskName) {
+	dependsOn vulkanControlShaderValidationTasks
+}
 
 tasks.register('buildMetalControlNative', Exec) {
 	group = 'verification'
@@ -219,6 +281,91 @@ tasks.named(sourceSets.metalControlSpike.compileJavaTaskName) {
 
 tasks.named(sourceSets.metalControlSpikeTest.compileJavaTaskName) {
 	dependsOn tasks.named(sourceSets.macSurfaceSpike.compileJavaTaskName), tasks.named(sourceSets.metalControlSpike.compileJavaTaskName)
+}
+
+tasks.named(sourceSets.vulkanControlSpike.compileJavaTaskName) {
+	dependsOn tasks.named(sourceSets.macSurfaceSpike.compileJavaTaskName), tasks.named(sourceSets.metalControlSpike.compileJavaTaskName)
+}
+
+tasks.named(sourceSets.vulkanControlSpikeTest.compileJavaTaskName) {
+	dependsOn tasks.named(sourceSets.macSurfaceSpike.compileJavaTaskName), tasks.named(sourceSets.metalControlSpike.compileJavaTaskName),
+		tasks.named(sourceSets.vulkanControlSpike.compileJavaTaskName)
+}
+
+tasks.register('vulkanControlSpikeTest', Test) {
+	group = 'verification'
+	description = 'Runs deterministic pure tests for the opt-in Vulkan/MoltenVK control spike.'
+	testClassesDirs = sourceSets.vulkanControlSpikeTest.output.classesDirs
+	classpath = sourceSets.vulkanControlSpikeTest.runtimeClasspath
+	exclude '**/*IntegrationTest.class'
+}
+
+tasks.register('vulkanControlIntegrationTest', Test) {
+	group = 'verification'
+	description = 'Runs the opt-in headful Vulkan/MoltenVK control smoke, readback, recreation, and teardown test.'
+	dependsOn tasks.named('buildMacSurfaceNative'), tasks.named(sourceSets.vulkanControlSpike.classesTaskName)
+	testClassesDirs = sourceSets.vulkanControlSpikeTest.output.classesDirs
+	classpath = sourceSets.vulkanControlSpikeTest.runtimeClasspath
+	include '**/*IntegrationTest.class'
+	systemProperty 'java.awt.headless', 'false'
+	systemProperty 'rlhd.spike.vulkan.integration', 'true'
+	systemProperty 'rlhd.spike.macos.library', macSurfaceNativeLibrary.get().asFile.absolutePath
+	def configuredVulkanLoader = providers.systemProperty('rlhd.spike.vulkan.loader')
+		.orElse(providers.environmentVariable('RLHD_VULKAN_LOADER')).orNull
+	if (configuredVulkanLoader) {
+		systemProperty 'rlhd.spike.vulkan.loader', configuredVulkanLoader
+	}
+}
+
+tasks.register('runVulkanControlSpike', JavaExec) {
+	group = 'application'
+	description = 'Runs the disposable Vulkan/MoltenVK AWT control program.'
+	dependsOn tasks.named('buildMacSurfaceNative'), tasks.named(sourceSets.vulkanControlSpike.classesTaskName)
+	classpath = sourceSets.vulkanControlSpike.runtimeClasspath
+	mainClass = 'rs117.hd.spikes.vulkan.control.VulkanControlDemo'
+	systemProperty 'java.awt.headless', 'false'
+	systemProperty 'rlhd.spike.macos.library', macSurfaceNativeLibrary.get().asFile.absolutePath
+	def configuredVulkanLoader = providers.systemProperty('rlhd.spike.vulkan.loader')
+		.orElse(providers.environmentVariable('RLHD_VULKAN_LOADER')).orNull
+	if (configuredVulkanLoader) {
+		systemProperty 'rlhd.spike.vulkan.loader', configuredVulkanLoader
+	}
+}
+
+tasks.register('vulkanControlSpikeJar', Jar) {
+	group = BasePlugin.BUILD_GROUP
+	description = 'Builds the opt-in Java-only Vulkan/MoltenVK control artifact.'
+	dependsOn sourceSets.macSurfaceSpike.classesTaskName, sourceSets.metalControlSpike.classesTaskName,
+		sourceSets.vulkanControlSpike.classesTaskName
+	archiveClassifier.set('vulkan-control-spike')
+	from sourceSets.macSurfaceSpike.output
+	from sourceSets.vulkanControlSpike.output
+	from(sourceSets.metalControlSpike.output) {
+		include 'rs117/hd/spikes/macos/control/SyntheticUi.class'
+	}
+}
+
+tasks.register('vulkanControlDependencyIsolation') {
+	group = 'verification'
+	description = 'Checks the Vulkan spike dependency/native boundary without changing production configurations.'
+	doLast {
+		def names = configurations.vulkanControlSpikeRuntimeClasspath.files.collect { it.name }
+		if (!names.contains('lwjgl-3.3.2.jar') || !names.contains('lwjgl-vulkan-3.3.2.jar') ||
+			!names.contains('lwjgl-3.3.2-natives-macos-arm64.jar')) {
+			throw new GradleException("Vulkan spike LWJGL 3.3.2 dependency set is incomplete: ${names}")
+		}
+		if (names.any { it.startsWith('lwjgl-vulkan-') && it.contains('natives-') }) {
+			throw new GradleException("lwjgl-vulkan must not contribute a macOS native: ${names}")
+		}
+	}
+}
+
+tasks.register('vulkanControlSpikeCheck') {
+	group = 'verification'
+	description = 'Builds and runs non-headful checks for the isolated Vulkan/MoltenVK control spike.'
+	dependsOn tasks.named('buildMacSurfaceNative'), tasks.named('macSurfaceNativeTest'), tasks.named('macSurfaceSpikeTest'),
+		tasks.named('validateVulkanControlShaders'), tasks.named('vulkanControlSpikeTest'),
+		tasks.named('vulkanControlDependencyIsolation'), tasks.named('vulkanControlSpikeJar')
 }
 
 tasks.register('metalControlSpikeTest', Test) {
