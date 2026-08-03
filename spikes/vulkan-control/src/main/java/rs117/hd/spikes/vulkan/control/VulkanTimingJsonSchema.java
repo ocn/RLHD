@@ -18,7 +18,7 @@ public final class VulkanTimingJsonSchema
 {
 	public static final String SCHEMA = "rlhd.renderer.timing/v1";
 	public static final String BACKEND = "vulkan-control";
-	private static final Set<String> TYPES = set("run_start", "frame", "run_end");
+	private static final Set<String> TYPES = set("run_start", "init_failure", "frame", "run_end");
 	private static final Set<String> REQUESTED_MODES = set("fifo-like", "unlocked");
 	private static final Set<String> EFFECTIVE_MODES = set("fifo-like", "unlocked", "mailbox");
 	private static final Set<String> OUTCOMES = set("submitted", "skipped-suspended", "skipped-in-flight", "nil-drawable", "rejected", "error");
@@ -45,6 +45,7 @@ public final class VulkanTimingJsonSchema
 			requireString(record, "backend", set(BACKEND));
 			String type = requireString(record, "type", TYPES);
 			if ("run_start".equals(type)) validateRunStart(record);
+			else if ("init_failure".equals(type)) validateInitFailure(record);
 			else if ("frame".equals(type)) validateFrame(record);
 			else validateRunEnd(record);
 		}
@@ -59,7 +60,10 @@ public final class VulkanTimingJsonSchema
 	{
 		if (lines == null || lines.size() < 2) throw invalid("log must contain start and end records");
 		for (String line : lines) validateLine(line);
-		if (!"run_start".equals(typeOf(lines.get(0))) || !"run_end".equals(typeOf(lines.get(lines.size() - 1)))) throw invalid("invalid run ordering");
+		String firstType = typeOf(lines.get(0));
+		if ((!"run_start".equals(firstType) && !"init_failure".equals(firstType)) ||
+			!"run_end".equals(typeOf(lines.get(lines.size() - 1)))) throw invalid("invalid run ordering");
+		if ("init_failure".equals(firstType) && lines.size() != 2) throw invalid("failed initialization cannot contain frames");
 		for (int index = 1; index < lines.size() - 1; index++) if (!"frame".equals(typeOf(lines.get(index)))) throw invalid("only frames may appear inside a run");
 	}
 
@@ -109,6 +113,19 @@ public final class VulkanTimingJsonSchema
 		boolean validationRequested = requireBoolean(caps, "validation_requested");
 		boolean validationEnabled = requireBoolean(caps, "validation_enabled");
 		if (validationEnabled && !validationRequested) throw invalid("validation cannot be enabled unless requested");
+	}
+
+	private static void validateInitFailure(JsonObject record)
+	{
+		requireLong(record, "timestamp_ns");
+		requireString(record, "requested_present_mode", REQUESTED_MODES);
+		requireString(record, "effective_present_mode", EFFECTIVE_MODES);
+		JsonObject counters = requireObject(record, "counters");
+		validateCounters(counters);
+		if (requireLong(counters, "init_errors") == 0) throw invalid("init_failure must report an initialization error");
+		if (requireLong(counters, "live_native_objects") != 0) throw invalid("init_failure must follow native cleanup");
+		if (require(record, "error").isJsonNull()) throw invalid("init_failure must describe the failure");
+		validateError(record);
 	}
 
 	private static void validateFrame(JsonObject record)

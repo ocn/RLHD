@@ -26,17 +26,18 @@ The focused, full non-headful, headful validation, shader, dependency, bytecode,
 - Runs a real two-frame 8x8 GPU readback check through a compatible offscreen render pass and explicit color-write-to-transfer-read barrier.
 - Uses timestamp queries only when the graphics queue reports nonzero valid bits and the physical device reports a finite positive timestamp period.
 - Emits strict `rlhd.renderer.timing/v1` JSONL with required maintenance1 capability truth, balanced submission/presentation/acquisition invariants, separate validation warning/error counters, a dedicated timestamp-query-error counter, and truthful unsupported presentation callback fields.
+- Emits a distinct `init_failure`/`run_end` sequence after failed construction, with final post-cleanup counters and no fabricated swapchain capabilities.
 - Documents the opt-in build/run boundary, log schema, exact 30-minute lifecycle checklist, provenance, and unresolved driver diagnostic.
 
 No 117HD renderer, production shader, production dependency, default task, or default artifact was changed.
 
 ## Test-driven progression
 
-The original recovered red compile had 29 expected missing-symbol errors. Review-round red/green added two expected missing-symbol errors for the explicit post-consumption close failure and then exercised:
+The original recovered red compile had 29 expected missing-symbol errors. Review-round red/green added two expected missing-symbol errors for the explicit post-consumption close failure. Round two first failed the schema test because `init_failure` was unsupported, then failed the headful integration test at the missing command-allocation injection. The resulting coverage exercises:
 
 - post-consumption close failures leave the wrapper closed while pre-consumption failures remain retryable;
 - required maintenance1/presentation-fence capability fields and final counter invariants;
-- live injected failures at partial swapchain-child creation, post-acquire, post-record, pre-submit, recreation, and post-consumption close;
+- live injected failures at command-resource, buffer, image, shader-module, readback, and partial swapchain-child allocation, plus post-acquire, post-record, pre-submit, recreation, and post-consumption close;
 - actual effective mode, recreation count, fullscreen submission, balanced submitted/completed/present/acquire counters, zero validation warning/error counts, and timestamp counter invariants;
 - exact runtime dependency and production/spike artifact boundaries.
 
@@ -70,7 +71,7 @@ JAVA_HOME=... RLHD_VULKAN_SDK=... ./gradlew --no-daemon --rerun-tasks \
   vulkanControlSpikeCheck vulkanControlSpikeJar
 ```
 
-Result: `BUILD SUCCESSFUL in 43s`, 30/30 tasks executed. This included production `test`/`jar`, Task 2's 100-cycle native harness, Task 2 Java tests, Task 3 pure tests, 15 Task 4 pure tests, all four fresh shader compile/validation pairs, exact dependency/artifact isolation, and the isolated jar.
+Result: `BUILD SUCCESSFUL in 42s`, 30/30 tasks executed. This included production `test`/`jar`, Task 2's 100-cycle native harness, Task 2 Java tests, Task 3 pure tests, 16 Task 4 pure tests, all four fresh shader compile/validation pairs, exact dependency/artifact isolation, and the isolated jar.
 
 Final headful validation run:
 
@@ -91,7 +92,7 @@ Result: `BUILD SUCCESSFUL in 8s`, 15/15 tasks executed, two integration tests pa
 - Resize, suspend/restore, IMMEDIATE/FIFO recreation, fullscreen entry/exit, and return to 777x403 completed.
 - 199 submitted = 199 completed = 199 present requests; 199 acquisition requests = 199 completions; `max_in_flight=2`; at least five recreations; zero command/init/shader/pipeline, validation warning/error, or timestamp-query errors; final app-tracked `live_native_objects=0`.
 - The complete JSONL run validated with a single run start/end and 200 attempted-frame records (199 submitted, one skipped suspended).
-- A second live integration test proved deterministic cleanup for partial initialization and injected acquire/record/submit/recreate/close failures, including post-consumption wrapper state.
+- A second live integration test proved deterministic cleanup for failed command/buffer/image/shader/readback/swapchain initialization and injected acquire/record/submit/recreate/close failures, including schema-valid failed-init logs and post-consumption wrapper state.
 
 Artifact/dependency checks:
 

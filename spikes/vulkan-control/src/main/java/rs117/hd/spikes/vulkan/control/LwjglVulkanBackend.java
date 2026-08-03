@@ -756,6 +756,7 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 				frames[index] = frame;
 				trackCreate();
 			}
+			failureInjector.check("command-resource-allocation");
 			VkSemaphoreCreateInfo semaphore = VkSemaphoreCreateInfo.calloc(stack).sType$Default();
 			VkFenceCreateInfo fence = VkFenceCreateInfo.calloc(stack).sType$Default().flags(VK_FENCE_CREATE_SIGNALED_BIT);
 			for (int index = 0; index < FRAME_COUNT; index++)
@@ -1134,6 +1135,8 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 			counterValues[COUNTER_SHADER_ERRORS]++;
 			throw new IllegalStateException("Unable to read SPIR-V resource: " + name, ex);
 		}
+		long module = NULL;
+		boolean complete = false;
 		try (MemoryStack stack = MemoryStack.stackPush())
 		{
 			ByteBuffer code = stack.malloc(bytes.length).put(bytes).flip();
@@ -1141,8 +1144,19 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 			LongBuffer handle = stack.mallocLong(1);
 			int result = vkCreateShaderModule(device, info, null, handle);
 			if (result != VK_SUCCESS) { counterValues[COUNTER_SHADER_ERRORS]++; throw failure("vkCreateShaderModule", result); }
+			module = handle.get(0);
 			trackCreate();
-			return handle.get(0);
+			failureInjector.check("shader-module-creation");
+			complete = true;
+			return module;
+		}
+		finally
+		{
+			if (!complete && module != NULL)
+			{
+				vkDestroyShaderModule(device, module, null);
+				trackRelease();
+			}
 		}
 	}
 
@@ -1263,6 +1277,7 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 				.memoryTypeIndex(findMemoryType(requirements.memoryTypeBits(), properties));
 			check(vkAllocateMemory(device, allocate, null, handle), "vkAllocateMemory(buffer)");
 			resource.memory = handle.get(0); trackCreate();
+			failureInjector.check("buffer-allocation");
 			check(vkBindBufferMemory(device, resource.buffer, resource.memory, 0), "vkBindBufferMemory");
 			complete = true;
 		}
@@ -1296,6 +1311,7 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 				.memoryTypeIndex(findMemoryType(requirements.memoryTypeBits(), properties));
 			check(vkAllocateMemory(device, allocate, null, handle), "vkAllocateMemory(image)");
 			resource.memory = handle.get(0); trackCreate();
+			failureInjector.check("image-allocation");
 			check(vkBindImageMemory(device, resource.image, resource.memory, 0), "vkBindImageMemory");
 			if (view)
 			{
@@ -1628,6 +1644,7 @@ final class LwjglVulkanBackend implements VulkanBackendAccess
 				check(vkAllocateCommandBuffers(device, command, pointer), "vkAllocateCommandBuffers(readback)");
 				resources.commandBuffer = new VkCommandBuffer(pointer.get(0), device); trackCreate();
 			}
+			failureInjector.check("readback-allocation");
 			return resources;
 		}
 		catch (RuntimeException | Error ex)

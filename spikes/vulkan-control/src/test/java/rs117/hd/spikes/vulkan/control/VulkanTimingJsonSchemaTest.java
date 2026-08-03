@@ -7,6 +7,8 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
@@ -61,6 +63,24 @@ public class VulkanTimingJsonSchemaTest
 			VulkanTimingJsonSchema.runStartFixture(),
 			VulkanTimingJsonSchema.frameFixture(),
 			VulkanTimingJsonSchema.runEndFixture()));
+	}
+
+	@Test
+	public void acceptsFailedInitializationWithoutFabricatedCapabilities() throws Exception
+	{
+		Path path = temporaryFolder.newFile("failed-init.jsonl").toPath();
+		long[] counters = new long[VulkanControlCounters.FIELD_COUNT];
+		counters[0] = 1;
+		try (VulkanTimingLog log = new VulkanTimingLog(path))
+		{
+			log.runEnd(VulkanPresentMode.FIFO, VulkanPresentMode.FIFO, counters,
+				"injected-command-resource-allocation");
+		}
+		java.util.List<String> lines = Files.readAllLines(path);
+		assertEquals(2, lines.size());
+		assertTrue(lines.get(0).contains("\"type\":\"init_failure\""));
+		assertFalse(lines.get(0).contains("\"capabilities\""));
+		VulkanTimingJsonSchema.validateLog(lines);
 	}
 
 	@Test

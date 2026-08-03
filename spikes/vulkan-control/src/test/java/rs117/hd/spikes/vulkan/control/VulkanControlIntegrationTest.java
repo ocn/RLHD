@@ -144,14 +144,24 @@ public class VulkanControlIntegrationTest
 			int width = Math.toIntExact(Math.round(extent.pixelWidth()));
 			int height = Math.toIntExact(Math.round(extent.pixelHeight()));
 
-			FailureAt partial = new FailureAt("partial-swapchain-children");
-			LwjglVulkanBackend incomplete = new LwjglVulkanBackend(surface.metalLayerHandle(), width, height,
-				Files.createTempFile("rlhd-vulkan-partial-", ".jsonl"), VulkanPresentMode.FIFO, true, partial);
-			assertFalse(incomplete.ready());
-			long[] partialCounters = new long[VulkanControlCounters.FIELD_COUNT];
-			incomplete.close(partialCounters);
-			assertEquals(0, new VulkanControlCounters(partialCounters).liveNativeObjects());
-			assertEquals(1, new VulkanControlCounters(partialCounters).initErrors());
+			for (String point : new String[] {"command-resource-allocation", "buffer-allocation", "image-allocation",
+				"shader-module-creation", "partial-swapchain-children"})
+			{
+				Path log = Files.createTempFile("rlhd-vulkan-partial-", ".jsonl");
+				FailureAt injected = new FailureAt(point);
+				LwjglVulkanBackend incomplete = new LwjglVulkanBackend(surface.metalLayerHandle(), width, height,
+					log, VulkanPresentMode.FIFO, true, injected);
+				assertFalse(incomplete.ready());
+				long[] partialCounters = new long[VulkanControlCounters.FIELD_COUNT];
+				incomplete.close(partialCounters);
+				VulkanControlCounters counters = new VulkanControlCounters(partialCounters);
+				assertTrue(injected.fired());
+				assertEquals(0, counters.liveNativeObjects());
+				assertEquals(1, counters.initErrors());
+				assertEquals(0, counters.validationWarnings());
+				assertEquals(0, counters.validationErrors());
+				VulkanTimingJsonSchema.validateLog(Files.readAllLines(log));
+			}
 
 			for (String point : new String[] {"after-acquire", "after-record", "before-submit", "during-recreate"})
 			{
@@ -168,8 +178,23 @@ public class VulkanControlIntegrationTest
 				assertEquals(counters.drawableAcquisitionRequests(), counters.drawableAcquisitionCompletions());
 				assertEquals(counters.submitted(), counters.completed());
 				assertEquals(0, counters.liveNativeObjects());
+				assertEquals(0, counters.validationWarnings());
+				assertEquals(0, counters.validationErrors());
 				VulkanTimingJsonSchema.validateLog(Files.readAllLines(log));
 			}
+
+			Path readbackLog = Files.createTempFile("rlhd-vulkan-readback-failure-", ".jsonl");
+			FailureAt readbackFailure = new FailureAt("readback-allocation");
+			LwjglVulkanBackend readbackBackend = new LwjglVulkanBackend(surface.metalLayerHandle(), width, height,
+				readbackLog, VulkanPresentMode.FIFO, true, readbackFailure);
+			VulkanControlRenderer readbackRenderer = new VulkanControlRenderer(readbackBackend, readbackLog);
+			assertThrows(IllegalStateException.class, readbackRenderer::runReadbackCheck);
+			assertTrue(readbackFailure.fired());
+			readbackRenderer.close();
+			assertEquals(0, readbackRenderer.counters().liveNativeObjects());
+			assertEquals(0, readbackRenderer.counters().validationWarnings());
+			assertEquals(0, readbackRenderer.counters().validationErrors());
+			VulkanTimingJsonSchema.validateLog(Files.readAllLines(readbackLog));
 
 			Path closeLog = Files.createTempFile("rlhd-vulkan-close-failure-", ".jsonl");
 			LwjglVulkanBackend closeBackend = new LwjglVulkanBackend(surface.metalLayerHandle(), width, height,
@@ -178,6 +203,8 @@ public class VulkanControlIntegrationTest
 			assertEquals(VulkanFrameOutcome.SUBMITTED, closeRenderer.render(extent, 2));
 			assertThrows(VulkanBackendCloseException.class, closeRenderer::close);
 			assertEquals(0, closeRenderer.counters().liveNativeObjects());
+			assertEquals(0, closeRenderer.counters().validationWarnings());
+			assertEquals(0, closeRenderer.counters().validationErrors());
 			assertThrows(IllegalStateException.class, closeRenderer::close);
 			VulkanTimingJsonSchema.validateLog(Files.readAllLines(closeLog));
 		}
@@ -207,6 +234,11 @@ public class VulkanControlIntegrationTest
 				fired = true;
 				throw new IllegalStateException("injected-" + point);
 			}
+		}
+
+		private boolean fired()
+		{
+			return fired;
 		}
 	}
 

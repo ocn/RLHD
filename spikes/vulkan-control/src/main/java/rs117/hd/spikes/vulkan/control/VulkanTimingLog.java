@@ -126,6 +126,7 @@ final class VulkanTimingLog implements AutoCloseable
 	synchronized void runEnd(VulkanPresentMode requested, VulkanPresentMode effective, long[] counters, String error)
 	{
 		if (ended) return;
+		if (!started) initFailure(requested, effective, counters, error);
 		JsonObject record = base("run_end");
 		record.addProperty("timestamp_ns", System.nanoTime());
 		record.addProperty("requested_present_mode", requested.logName());
@@ -135,6 +136,18 @@ final class VulkanTimingLog implements AutoCloseable
 		else record.addProperty("error", error);
 		write(record);
 		ended = true;
+	}
+
+	private void initFailure(VulkanPresentMode requested, VulkanPresentMode effective, long[] counters, String error)
+	{
+		JsonObject record = base("init_failure");
+		record.addProperty("timestamp_ns", System.nanoTime());
+		record.addProperty("requested_present_mode", requested.logName());
+		record.addProperty("effective_present_mode", effective.logName());
+		record.add("counters", counters(counters));
+		record.addProperty("error", error == null ? "initialization-failed" : error);
+		write(record);
+		started = true;
 	}
 
 	@Override
