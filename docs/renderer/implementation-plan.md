@@ -60,9 +60,9 @@ final class PreparedDrawRange {
 }
 
 interface RendererBackend extends AutoCloseable {
-    void uploadZone(int zoneId, PreparedZoneGeometry geometry);
-    void render(PreparedFrame frame);
-    void destroyZone(int zoneId);
+	void uploadZone(ZoneKey key, PreparedZoneGeometry geometry);
+	FrameOutcome render(PreparedFrame frame);
+	void destroyZone(ZoneKey key);
 }
 
 interface SurfaceProvider extends AutoCloseable {
@@ -75,10 +75,10 @@ interface VulkanSurfaceProvider extends SurfaceProvider {
 }
 
 final class PreparedFrame {
-    int zoneId();
-    CameraUniforms camera();
-    SurfaceExtent viewport();
-    IntBuffer uiPixels();
+	ZoneKey zone();
+	CameraUniforms camera();
+	SurfaceExtent viewport();
+	PreparedUiTexture ui();
 }
 ```
 
@@ -89,10 +89,12 @@ and its A/B/C IDs preserve those three associations. Draw ranges do not claim a 
 `PreparedPass` initially has only `OPAQUE`. All returned buffers are zero-based read-only views whose private
 mutable backing buffers are transferred to `PreparedZoneGeometry`; no mutable alias may escape preparation.
 The ordinary OpenGL path writes directly to its existing mapped buffers through the shared generation routine,
-while `prepareZone` is an explicit capture/backend path. `PreparedFrame` carries camera, viewport, one top-level
-zone reference, and UI pixels; it carries no GPU ownership. The Vulkan surface handle exists only between the
-platform adapter and Vulkan backend: the backend destroys `VkSurfaceKHR` before the provider releases its borrowed
-native layer.
+while `prepareZone` is an explicit capture/backend path. `ZoneKey` contains world-view ID, zone X/Z, and a generation
+so replacement cannot alias in-flight work. `PreparedFrame` carries immutable camera, viewport, one top-level zone
+reference, and a fully described UI snapshot (dimensions, row stride, pixel format, and read-only pixels); it carries
+no GPU ownership. `FrameOutcome` distinguishes rendered, suspended-zero-extent, rejected-input, and backend-failure
+results. The Vulkan surface handle exists only between the platform adapter and Vulkan backend: the backend destroys
+`VkSurfaceKHR` before the provider releases its borrowed native layer.
 
 ## Task 0: Resolve entry gates
 
@@ -127,21 +129,53 @@ native layer.
 
 ## Task 2: Render one opaque static zone through Vulkan
 
+Task 2 is split because the current macOS host has repeatedly panicked in WindowServer/DCP presentation. Task 2A is
+CPU/offline only and cannot establish renderer correctness. Task 2B is the original live acceptance gate and remains
+`NOT RUN` until a safe host or display topology is available. Full Task 2 completion requires both parts.
+
+### Task 2A: Lock the opaque-zone contract offline
+
 **Files:**
+
+- Create: `src/main/java/rs117/hd/renderer/RendererBackend.java`
+- Create: `src/main/java/rs117/hd/renderer/FrameOutcome.java`
+- Create: `src/main/java/rs117/hd/renderer/ZoneKey.java`
+- Create: `src/main/java/rs117/hd/renderer/CameraUniforms.java`
+- Create: `src/main/java/rs117/hd/renderer/SurfaceExtent.java`
+- Create: `src/main/java/rs117/hd/renderer/PreparedUiTexture.java`
+- Create: `src/main/java/rs117/hd/renderer/PreparedFrame.java`
+- Create: `spikes/vulkan-opaque-slice/src/main/java/rs117/hd/spikes/vulkan/opaque/VulkanOpaqueZoneContract.java`
+- Create: `spikes/vulkan-opaque-slice/src/main/java/rs117/hd/spikes/vulkan/opaque/VulkanZoneResourcePlan.java`
+- Create: `spikes/vulkan-opaque-slice/src/main/shaders/opaque.vert`
+- Create: `spikes/vulkan-opaque-slice/src/main/shaders/opaque.frag`
+- Create: `spikes/vulkan-opaque-slice/src/main/shaders/ui.vert`
+- Create: `spikes/vulkan-opaque-slice/src/main/shaders/ui.frag`
+- Test: `src/test/java/rs117/hd/renderer/RendererBackendContractTest.java`
+- Test: `src/test/java/rs117/hd/renderer/PreparedFrameTest.java`
+- Test: `spikes/vulkan-opaque-slice/src/test/java/rs117/hd/spikes/vulkan/opaque/VulkanOpaqueZoneContractTest.java`
+- Modify: `build.gradle`
+
+- [ ] Write failing tests for immutable frame/UI snapshots, generation-safe zone identity, upload replacement/destroy semantics, unknown-zone rejection, zero-extent suspension, partial-upload rollback, aggregated teardown, and resource-ledger underflow.
+- [ ] Define the opaque vertex binding as one 28-byte record: signed-short position at offset 0, half-float UVW at 8, signed-short normal at 16, and signed face reference at 24. Serialize vertex and 36-byte face records little-endian and validate opaque counts, triangle-aligned ranges, face-reference bounds, reversed winding, and Task 1 BASE material associations.
+- [ ] Define a 72-byte vertex push range (`mat4 clipFromWorld` at 0 and `ivec2 sceneBase` at 64), reverse-Z depth (`D32_SFLOAT`, clear 0, `GREATER_OR_EQUAL`), negative-height dynamic viewport, BGRA8 sRGB-nonlinear color, and premultiplied UI composition as a pure manifest with CPU projection/depth/winding tests.
+- [ ] Compile and validate all four real shaders offline for Vulkan 1.2. Generate deterministic JSON reflection and fail on interface drift: opaque locations 0-3, scalar metadata `ArrayStride=4` at set 0/binding 0, push offsets/size, fragment output, and UI sampler set 0/binding 0. Java tests separately pin formats, offsets, stages, and pipeline state not represented by reflection.
+- [ ] Keep Vulkan-specific classes, SPIR-V, reflection JSON, LWJGL, and native dependencies out of the production JAR/runtime. Task 2A must never load a Vulkan loader, enumerate a device, create a native layer/surface/swapchain, submit, present, or open a window.
+- [ ] Independently review and commit Task 2A as partial progress only. Record every physical-device, MoltenVK pipeline, clipping/interpolation/culling, gamma/orientation, UI blend, validation, readback, acquire/submit/present, and resource-retirement claim as `NOT RUN`.
+
+### Task 2B: Execute the live opaque-zone slice safely
+
+**Files (provisional until owner and packaging gates resolve):**
 
 - Create: `src/main/java/rs117/hd/renderer/vulkan/VulkanRendererBackend.java`
 - Create: `src/main/java/rs117/hd/renderer/vulkan/VulkanZoneResources.java`
 - Create: `src/main/java/rs117/hd/renderer/vulkan/VulkanSurfaceProvider.java`
-- Create: `src/main/java/rs117/hd/renderer/PreparedFrame.java`
-- Create: `src/main/resources/rs117/hd/renderer/vulkan/opaque.vert.glsl`
-- Create: `src/main/resources/rs117/hd/renderer/vulkan/opaque.frag.glsl`
 - Test: `src/test/java/rs117/hd/renderer/vulkan/VulkanOpaqueZoneIntegrationTest.java`
 
-- [ ] Write a failing integration test that uploads Task 1's fixed prepared geometry, renders one top-level opaque static zone plus the exact UI texture, and compares GPU readback with the approved golden/tolerance in `shader-correctness-plan.md`.
-- [ ] Move only the reviewed Task 4 surface/swapchain/resource-lifetime mechanisms required by this path behind `SurfaceProvider` and `RendererBackend`; retain their failure-injection tests.
-- [ ] Compile and validate the two real shaders offline for Vulkan 1.2; fail the build on `spirv-val` or reflection-layout mismatch.
-- [ ] Implement one vertex buffer, one opaque pipeline, depth, viewport/camera data, UI composition, and presentation. Exclude alpha, textures/material effects, dynamic models, shadows, lighting, water, and post-processing.
-- [ ] Run the integration test with validation enabled; require zero warnings/errors, balanced acquire/submit/present counters, and zero app-tracked live objects after close.
+- [ ] Approve a numeric golden-image tolerance in `shader-correctness-plan.md` and identify a safe live-test host/topology.
+- [ ] Write a failing integration test that uploads Task 1's fixed geometry, renders one top-level opaque zone plus the exact UI texture, and compares GPU readback with that approved golden/tolerance.
+- [ ] Move only the reviewed Task 4 loader/device/surface/swapchain/synchronization/resource-lifetime mechanisms required by this path behind `SurfaceProvider` and `RendererBackend`; retain failure-injection tests.
+- [ ] Implement staging uploads, one opaque pipeline, depth, viewport/camera push data, UI composition, offscreen readback, and presentation. Exclude alpha, textures/material effects, dynamic models, shadows, lighting, water, and post-processing.
+- [ ] Run with validation enabled; require zero warnings/errors, golden/readback acceptance, balanced acquire/submit/present counters, and zero app-tracked live objects after close.
 
 ## Task 3: Add opt-in selection and safe fallback
 
