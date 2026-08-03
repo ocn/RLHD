@@ -14,7 +14,7 @@ interface NativeRendererAccess
 
 	long[] counters(long stateHandle);
 
-	boolean runReadbackCheck(long stateHandle);
+	boolean runReadbackCheck(long stateHandle, byte[] firstUiBytes, byte[] secondUiBytes);
 
-	long[] close(long stateHandle);
+	void close(long stateHandle, long[] finalCounters);
 }

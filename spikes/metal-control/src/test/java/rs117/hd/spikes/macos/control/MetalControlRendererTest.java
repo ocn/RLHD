@@ -5,9 +5,10 @@ import org.junit.Test;
 import rs117.hd.spikes.macos.SurfaceExtent;
 
 import static org.junit.Assert.assertEquals;
-	import static org.junit.Assert.assertFalse;
-	import static org.junit.Assert.assertThrows;
-	import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 
 public class MetalControlRendererTest
 {
@@ -51,10 +52,34 @@ public class MetalControlRendererTest
 		MetalControlRenderer renderer = new MetalControlRenderer(access, 1, Paths.get("timing.jsonl"), PresentMode.FIFO_LIKE, "");
 
 		assertThrows(IllegalStateException.class, renderer::close);
+		assertFalse(access.consumed);
 		assertEquals(FrameOutcome.SUBMITTED, renderer.render(SurfaceExtent.of(2, 2, 1), 1));
 		renderer.close();
+		assertTrue(access.consumed);
 		assertEquals(2, access.closeCalls);
 		assertFalse(renderer.counters().hasErrors());
+	}
+
+	@Test
+	public void postConsumptionMaterializationFailureIsTerminalAndUsesRawSnapshot()
+	{
+		FakeNative access = new FakeNative();
+		int[] materializations = {0};
+		MetalControlRenderer renderer = new MetalControlRenderer(access, 1, Paths.get("timing.jsonl"),
+			PresentMode.FIFO_LIKE, "", values ->
+			{
+				if (materializations[0]++ == 0) throw new IllegalStateException("injected materialization failure");
+				return new MetalControlCounters(values);
+			});
+
+		assertThrows(IllegalStateException.class, renderer::close);
+		assertEquals(1, access.closeCalls);
+		assertTrue(access.consumed);
+		assertThrows(IllegalStateException.class, () -> renderer.render(SurfaceExtent.of(1, 1, 1), 1));
+		assertThrows(IllegalStateException.class, renderer::close);
+		assertEquals(0, renderer.counters().liveNativeObjects());
+		assertEquals(1, access.closeCalls);
+		assertEquals(2, materializations[0]);
 	}
 
 	private static final class FakeNative implements NativeRendererAccess
@@ -62,6 +87,7 @@ public class MetalControlRendererTest
 		private boolean ready = true;
 		private boolean failCloseOnce;
 		private int closeCalls;
+		private boolean consumed;
 		private String failureStage;
 		private PresentMode presentMode;
 		private final long[] counters = new long[MetalControlCounters.FIELD_COUNT];
@@ -101,10 +127,17 @@ public class MetalControlRendererTest
 
 		@Override public void setPresentMode(long stateHandle, PresentMode requestedMode) { presentMode = requestedMode; }
 		@Override public long[] counters(long stateHandle) { return counters.clone(); }
-		@Override public boolean runReadbackCheck(long stateHandle) { return true; }
+		@Override
+		public boolean runReadbackCheck(long stateHandle, byte[] firstUiBytes, byte[] secondUiBytes)
+		{
+			assertEquals(SyntheticUi.byteCount(8, 8), firstUiBytes.length);
+			assertEquals(firstUiBytes.length, secondUiBytes.length);
+			assertNotEquals(firstUiBytes[(6 * 8 + 6) * 4], secondUiBytes[(6 * 8 + 6) * 4]);
+			return true;
+		}
 
 		@Override
-		public long[] close(long stateHandle)
+		public void close(long stateHandle, long[] finalCounters)
 		{
 			closeCalls++;
 			if (failCloseOnce)
@@ -112,8 +145,9 @@ public class MetalControlRendererTest
 				failCloseOnce = false;
 				throw new IllegalStateException("injected close failure");
 			}
+			consumed = true;
 			counters[13] = 0;
-			return counters.clone();
+			System.arraycopy(counters, 0, finalCounters, 0, counters.length);
 		}
 	}
 }

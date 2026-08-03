@@ -30,6 +30,12 @@ enum
 	COUNTER_LIVE_NATIVE_OBJECTS,
 	COUNTER_HIGH_WATER_NATIVE_OBJECTS,
 	COUNTER_MAX_IN_FLIGHT,
+	COUNTER_PRESENTATION_CALLBACKS,
+	COUNTER_PRESENTATION_DROPPED,
+	COUNTER_PRESENTATION_TIMEOUTS,
+	COUNTER_PRESENT_MODE_DIVERGENCES,
+	COUNTER_DRAWABLE_ACQUISITION_REQUESTS,
+	COUNTER_DRAWABLE_ACQUISITION_COMPLETIONS,
 	COUNTER_COUNT
 };
 
@@ -48,6 +54,66 @@ typedef enum FrameOutcome
 	OUTCOME_REJECTED,
 	OUTCOME_ERROR
 } FrameOutcome;
+
+@interface RlhdPresentationToken : NSObject
+{
+	pthread_mutex_t token_mutex;
+	dispatch_semaphore_t token_semaphore;
+	bool token_done;
+	double token_presented_time;
+}
+- (void)markPresentedTime:(double)presentedTime;
+- (bool)waitUntil:(dispatch_time_t)deadline;
+- (bool)snapshotPresentedTime:(double *)presentedTime;
+@end
+
+@implementation RlhdPresentationToken
+- (instancetype)init
+{
+	self = [super init];
+	if (self != nil)
+	{
+		pthread_mutex_init(&token_mutex, NULL);
+		token_semaphore = dispatch_semaphore_create(0);
+	}
+	return self;
+}
+
+- (void)dealloc
+{
+	if (token_semaphore != NULL) dispatch_release(token_semaphore);
+	pthread_mutex_destroy(&token_mutex);
+	[super dealloc];
+}
+
+- (void)markPresentedTime:(double)presentedTime
+{
+	pthread_mutex_lock(&token_mutex);
+	if (!token_done)
+	{
+		token_done = true;
+		token_presented_time = presentedTime;
+		dispatch_semaphore_signal(token_semaphore);
+	}
+	pthread_mutex_unlock(&token_mutex);
+}
+
+- (bool)waitUntil:(dispatch_time_t)deadline
+{
+	double ignored;
+	if ([self snapshotPresentedTime:&ignored]) return true;
+	return dispatch_semaphore_wait(token_semaphore, deadline) == 0;
+}
+
+- (bool)snapshotPresentedTime:(double *)presentedTime
+{
+	pthread_mutex_lock(&token_mutex);
+	bool done = token_done;
+	if (done && presentedTime != NULL) *presentedTime = token_presented_time;
+	pthread_mutex_unlock(&token_mutex);
+	return done;
+}
+@end
 
 typedef struct TextureSlot
 {
@@ -69,7 +135,17 @@ typedef struct FrameTiming
 	uint64_t encode_ns;
 	uint64_t submit_ns;
 	uint64_t total_ns;
+	uint64_t submit_host_ns;
 	int slot_index;
+	bool gpu_done;
+	bool command_error;
+	double gpu_start_time;
+	double gpu_end_time;
+	const char *presentation_status;
+	double presented_time;
+	id<CAMetalDrawable> drawable;
+	RlhdPresentationToken *presentation_token;
+	struct FrameTiming *next;
 } FrameTiming;
 
 typedef struct MetalControlState
@@ -87,6 +163,21 @@ typedef struct MetalControlState
 	id<MTLSamplerState> sampler;
 	TextureSlot slots[3];
 	NSUInteger inflight;
+	NSUInteger pending_frame_callbacks;
+	FrameTiming *completed_frames;
+	dispatch_queue_t drawable_queue;
+	bool acquisition_pending;
+	bool acquisition_returned_nil;
+	uint64_t acquisition_generation;
+	id<CAMetalDrawable> ready_drawable;
+	bool stall_drawable;
+	bool ignore_present_mode_setter;
+	bool unsupported_present_callback;
+	bool timeout_present_callback;
+	bool dropped_present_callback;
+	bool bypass_upload;
+	bool bypass_present;
+	bool fail_close_preconsume_once;
 	PresentMode requested_mode;
 	PresentMode effective_mode;
 	FILE *log;
@@ -211,7 +302,9 @@ static void write_counters(FILE *log, const uint64_t *counters)
 		"\"present_requested\":%llu,\"nil_drawable\":%llu,\"skipped_suspended\":%llu,"
 		"\"skipped_in_flight\":%llu,\"ui_upload_bytes\":%llu,\"resize_rebuilds\":%llu,"
 		"\"device_rebuilds\":%llu,\"live_native_objects\":%llu,\"high_water_native_objects\":%llu,"
-		"\"max_in_flight\":%llu}",
+		"\"max_in_flight\":%llu,\"presentation_callbacks\":%llu,\"presentation_dropped\":%llu,"
+		"\"presentation_timeouts\":%llu,\"present_mode_divergences\":%llu,"
+		"\"drawable_acquisition_requests\":%llu,\"drawable_acquisition_completions\":%llu}",
 		(unsigned long long) counters[0], (unsigned long long) counters[1],
 		(unsigned long long) counters[2], (unsigned long long) counters[3],
 		(unsigned long long) counters[4], (unsigned long long) counters[5],
@@ -219,7 +312,10 @@ static void write_counters(FILE *log, const uint64_t *counters)
 		(unsigned long long) counters[8], (unsigned long long) counters[9],
 		(unsigned long long) counters[10], (unsigned long long) counters[11],
 		(unsigned long long) counters[12], (unsigned long long) counters[13],
-		(unsigned long long) counters[14], (unsigned long long) counters[15]);
+		(unsigned long long) counters[14], (unsigned long long) counters[15],
+		(unsigned long long) counters[16], (unsigned long long) counters[17],
+		(unsigned long long) counters[18], (unsigned long long) counters[19],
+		(unsigned long long) counters[20], (unsigned long long) counters[21]);
 }
 
 static void log_run_start(MetalControlState *state)
@@ -237,8 +333,8 @@ static void log_run_start(MetalControlState *state)
 
 static void log_frame(MetalControlState *state, uint64_t frame_id, NSUInteger width, NSUInteger height,
 	PresentMode requested, PresentMode effective, FrameOutcome outcome, uint64_t ui_generate_ns, uint64_t ui_upload_ns,
-	uint64_t encode_ns, uint64_t submit_ns, uint64_t total_ns, id<MTLCommandBuffer> command_buffer,
-	bool present_requested, bool drawable_available, const char *error)
+	uint64_t encode_ns, uint64_t submit_ns, uint64_t total_ns, uint64_t submit_host_ns, double gpu_start_time, double gpu_end_time,
+	bool present_requested, bool drawable_available, const char *presentation_status, double presented_time, const char *error)
 {
 	if (state->log == NULL)
 	{
@@ -253,10 +349,10 @@ static void log_frame(MetalControlState *state, uint64_t frame_id, NSUInteger wi
 		present_mode_name(requested), present_mode_name(effective), outcome_name(outcome),
 		(unsigned long long) ui_generate_ns, (unsigned long long) ui_upload_ns, (unsigned long long) encode_ns,
 		(unsigned long long) submit_ns, (unsigned long long) total_ns);
-	if (command_buffer != nil && command_buffer.GPUStartTime > 0.0 && command_buffer.GPUEndTime >= command_buffer.GPUStartTime)
+	if (gpu_start_time > 0.0 && gpu_end_time >= gpu_start_time)
 	{
-		uint64_t start = (uint64_t) (command_buffer.GPUStartTime * 1000000000.0);
-		uint64_t end = (uint64_t) (command_buffer.GPUEndTime * 1000000000.0);
+		uint64_t start = (uint64_t) (gpu_start_time * 1000000000.0);
+		uint64_t end = (uint64_t) (gpu_end_time * 1000000000.0);
 		fprintf(state->log, "\"gpu_ns\":{\"start\":%llu,\"end\":%llu,\"duration\":%llu},",
 			(unsigned long long) start, (unsigned long long) end, (unsigned long long) (end - start));
 	}
@@ -264,10 +360,23 @@ static void log_frame(MetalControlState *state, uint64_t frame_id, NSUInteger wi
 	{
 		fprintf(state->log, "\"gpu_ns\":null,");
 	}
-	fprintf(state->log, "\"present\":{\"requested\":%s,\"drawable_available\":%s},\"counters\":",
-		present_requested ? "true" : "false", drawable_available ? "true" : "false");
+	fprintf(state->log, "\"present\":{\"requested\":%s,\"drawable_available\":%s,\"callback_status\":\"%s\",",
+		present_requested ? "true" : "false", drawable_available ? "true" : "false",
+		presentation_status == NULL ? "not-requested" : presentation_status);
+	if (presented_time > 0.0)
+	{
+		uint64_t presented_ns = (uint64_t) (presented_time * 1000000000.0);
+		uint64_t latency_ns = presented_ns >= submit_host_ns ? presented_ns - submit_host_ns : 0;
+		fprintf(state->log, "\"presented_time_ns\":%llu,\"latency_ns\":%llu},\"counters\":",
+			(unsigned long long) presented_ns, (unsigned long long) latency_ns);
+	}
+	else
+	{
+		fprintf(state->log, "\"presented_time_ns\":null,\"latency_ns\":null},\"counters\":");
+	}
 	write_counters(state->log, state->counters);
-	fprintf(state->log, ",\"error\":%s}\n", error == NULL ? "null" : "\"command-buffer-error\"");
+	if (error == NULL) fprintf(state->log, ",\"error\":null}\n");
+	else fprintf(state->log, ",\"error\":\"%s\"}\n", error);
 	fflush(state->log);
 }
 
@@ -275,19 +384,23 @@ static void configure_present_mode_locked(MetalControlState *state, PresentMode 
 {
 	state->requested_mode = requested;
 	__block bool supports_unlocked = false;
+	__block bool observed_sync = true;
 	dispatch_main_sync(^{
 		state->layer.presentsWithTransaction = NO;
-		supports_unlocked = [state->layer respondsToSelector:@selector(setDisplaySyncEnabled:)];
-		if (requested == PRESENT_UNLOCKED && supports_unlocked)
+		supports_unlocked = [state->layer respondsToSelector:@selector(setDisplaySyncEnabled:)] &&
+			[state->layer respondsToSelector:@selector(displaySyncEnabled)];
+		if (!state->ignore_present_mode_setter && requested == PRESENT_UNLOCKED && supports_unlocked)
 		{
 			state->layer.displaySyncEnabled = NO;
 		}
-		else if (supports_unlocked)
+		else if (!state->ignore_present_mode_setter && supports_unlocked)
 		{
 			state->layer.displaySyncEnabled = YES;
 		}
+		if (supports_unlocked) observed_sync = state->layer.displaySyncEnabled;
 	});
-	state->effective_mode = requested == PRESENT_UNLOCKED && supports_unlocked ? PRESENT_UNLOCKED : PRESENT_FIFO_LIKE;
+	state->effective_mode = supports_unlocked && !observed_sync ? PRESENT_UNLOCKED : PRESENT_FIFO_LIKE;
+	if (state->effective_mode != requested) state->counters[COUNTER_PRESENT_MODE_DIVERGENCES]++;
 }
 
 static void release_device_objects_locked(MetalControlState *state)
@@ -428,6 +541,59 @@ static id<MTLDevice> preferred_device(MetalControlState *state)
 	return [preferred autorelease];
 }
 
+static void release_ready_drawable_locked(MetalControlState *state)
+{
+	if (state->ready_drawable != nil)
+	{
+		[state->ready_drawable release];
+		state->ready_drawable = nil;
+		track_release(state);
+	}
+}
+
+static void schedule_drawable_acquisition_locked(MetalControlState *state)
+{
+	if (!state->accepting || state->acquisition_pending || state->ready_drawable != nil)
+	{
+		return;
+	}
+	state->acquisition_pending = true;
+	state->counters[COUNTER_DRAWABLE_ACQUISITION_REQUESTS]++;
+	uint64_t generation = state->acquisition_generation;
+	dispatch_async(state->drawable_queue, ^{
+		@autoreleasepool
+		{
+			id<CAMetalDrawable> acquired = nil;
+			if (state->stall_drawable)
+			{
+				struct timespec pause = {0, 250000000};
+				nanosleep(&pause, NULL);
+			}
+			else
+			{
+				acquired = [[state->layer nextDrawable] retain];
+			}
+			pthread_mutex_lock(&state->mutex);
+			state->counters[COUNTER_DRAWABLE_ACQUISITION_COMPLETIONS]++;
+			if (state->accepting && generation == state->acquisition_generation && acquired != nil && state->ready_drawable == nil)
+			{
+				state->ready_drawable = acquired;
+				track_create(state);
+				acquired = nil;
+			}
+			else if (state->accepting && generation == state->acquisition_generation && acquired == nil)
+			{
+				state->acquisition_returned_nil = true;
+				state->counters[COUNTER_NIL_DRAWABLE]++;
+			}
+			[acquired release];
+			state->acquisition_pending = false;
+			pthread_cond_broadcast(&state->drained);
+			pthread_mutex_unlock(&state->mutex);
+		}
+	});
+}
+
 static int find_free_slot(MetalControlState *state)
 {
 	for (int index = 0; index < 3; index++)
@@ -470,38 +636,48 @@ static bool ensure_slot_texture_locked(MetalControlState *state, int slot_index,
 	return true;
 }
 
-static void write_synthetic_ui(uint8_t *bytes, NSUInteger width, NSUInteger height, uint64_t frame_id)
+static bool upload_java_ui(JNIEnv *env, MetalControlState *state, jbyteArray ui_bytes,
+	id<MTLTexture> texture, NSUInteger width, NSUInteger height)
 {
-	for (NSUInteger y = 0; y < height; y++)
+	jlong expected_length = (jlong) width * (jlong) height * 4;
+	if (ui_bytes == NULL || (*env)->GetArrayLength(env, ui_bytes) != expected_length)
 	{
-		for (NSUInteger x = 0; x < width; x++)
-		{
-			NSUInteger index = (y * width + x) * 4;
-			if (x < width / 2 && y < height / 2)
-			{
-				bytes[index] = 0; bytes[index + 1] = 0; bytes[index + 2] = 0; bytes[index + 3] = 0;
-			}
-			else if (x >= width / 2 && y < height / 2)
-			{
-				bytes[index] = 0; bytes[index + 1] = 0; bytes[index + 2] = 128; bytes[index + 3] = 128;
-			}
-			else if (x < width / 2)
-			{
-				bytes[index] = 255; bytes[index + 1] = 0; bytes[index + 2] = 0; bytes[index + 3] = 255;
-			}
-			else
-			{
-				uint8_t alpha = 192;
-				uint8_t red = (uint8_t) ((frame_id * 5 + x * 3 + y) & 0xff);
-				uint8_t green = (uint8_t) ((frame_id * 3 + x + y * 5) & 0xff);
-				uint8_t blue = (uint8_t) ((frame_id * 7 + x * 2 + y * 3) & 0xff);
-				bytes[index] = (uint8_t) ((blue * alpha + 127) / 255);
-				bytes[index + 1] = (uint8_t) ((green * alpha + 127) / 255);
-				bytes[index + 2] = (uint8_t) ((red * alpha + 127) / 255);
-				bytes[index + 3] = alpha;
-			}
-		}
+		throw_exception(env, "java/lang/IllegalArgumentException", "UI upload must contain exact premultiplied BGRA bytes.");
+		return false;
 	}
+	jbyte *bytes = (*env)->GetByteArrayElements(env, ui_bytes, NULL);
+	if (bytes == NULL) return false;
+	if (!state->bypass_upload)
+	{
+		[texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0
+			withBytes:bytes bytesPerRow:width * 4];
+	}
+	(*env)->ReleaseByteArrayElements(env, ui_bytes, bytes, JNI_ABORT);
+	return true;
+}
+
+static bool encode_scene(MetalControlState *state, id<MTLCommandBuffer> command_buffer,
+	id<MTLTexture> target, id<MTLTexture> ui_texture, uint64_t frame_id, bool fixed_clear)
+{
+	MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+	pass.colorAttachments[0].texture = target;
+	pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+	pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+	double pulse = fixed_clear ? 0.75 : 0.5 + 0.5 * sin((double) frame_id * 0.025);
+	pass.colorAttachments[0].clearColor = fixed_clear ? MTLClearColorMake(0.10, 0.15, 0.20, 1.0) :
+		MTLClearColorMake(0.04 + pulse * 0.08, 0.08, 0.14 + pulse * 0.08, 1.0);
+	id<MTLRenderCommandEncoder> encoder = [command_buffer renderCommandEncoderWithDescriptor:pass];
+	if (encoder == nil) return false;
+	float phase = fixed_clear ? 0.0f : (float) ((double) frame_id * 0.0125);
+	[encoder setRenderPipelineState:state->triangle_pipeline];
+	[encoder setVertexBytes:&phase length:sizeof(phase) atIndex:0];
+	[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+	[encoder setRenderPipelineState:state->ui_pipeline];
+	[encoder setFragmentTexture:ui_texture atIndex:0];
+	[encoder setFragmentSamplerState:state->sampler atIndex:0];
+	[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+	[encoder endEncoding];
+	return true;
 }
 
 JNIEXPORT jlong JNICALL Java_rs117_hd_spikes_macos_control_MetalControlNative_nativeCreate(
@@ -524,15 +700,31 @@ JNIEXPORT jlong JNICALL Java_rs117_hd_spikes_macos_control_MetalControlNative_na
 		}
 		state->accepting = true;
 		track_create(state);
+		state->drawable_queue = dispatch_queue_create("rs117.hd.metal-control.drawable", DISPATCH_QUEUE_SERIAL);
+		if (state->drawable_queue != NULL) track_create(state);
+		else state->counters[COUNTER_INIT_ERRORS]++;
 		state->layer = (CAMetalLayer *) (intptr_t) layer_handle;
 		NSString *mode_string = string_from_java(env, requested_mode);
 		NSString *failure_string = string_from_java(env, failure_stage);
 		NSString *path = string_from_java(env, log_path);
 		state->requested_mode = parse_present_mode(mode_string);
 		state->effective_mode = PRESENT_FIFO_LIKE;
+		state->stall_drawable = [failure_string isEqualToString:@"stalled-drawable"];
+		state->ignore_present_mode_setter = [failure_string isEqualToString:@"ignored-present-mode"];
+		state->unsupported_present_callback = [failure_string isEqualToString:@"unsupported-present-callback"];
+		state->timeout_present_callback = [failure_string isEqualToString:@"timeout-present-callback"];
+		state->dropped_present_callback = [failure_string isEqualToString:@"dropped-present-callback"];
+		state->bypass_upload = [failure_string isEqualToString:@"bypass-upload"];
+		state->bypass_present = [failure_string isEqualToString:@"bypass-present"];
+		state->fail_close_preconsume_once = [failure_string isEqualToString:@"close-preconsume"];
 		if (state->layer == nil || ![state->layer isKindOfClass:[CAMetalLayer class]])
 		{
 			state->counters[COUNTER_INIT_ERRORS]++;
+		}
+		else
+		{
+			dispatch_main_sync(^{ [state->layer retain]; });
+			track_create(state);
 		}
 		if (path != nil)
 		{
@@ -553,6 +745,7 @@ JNIEXPORT jlong JNICALL Java_rs117_hd_spikes_macos_control_MetalControlNative_na
 			configure_present_mode_locked(state, state->requested_mode);
 		}
 		log_run_start(state);
+		if (state->ready) schedule_drawable_acquisition_locked(state);
 		return (jlong) (intptr_t) state;
 	}
 }
@@ -568,6 +761,75 @@ JNIEXPORT jboolean JNICALL Java_rs117_hd_spikes_macos_control_MetalControlNative
 	return ready ? JNI_TRUE : JNI_FALSE;
 }
 
+static void finalize_frame_locked(MetalControlState *state, FrameTiming *timing)
+{
+	log_frame(state, timing->frame_id, timing->width, timing->height,
+		timing->requested_mode, timing->effective_mode, OUTCOME_SUBMITTED,
+		timing->ui_generate_ns, timing->ui_upload_ns, timing->encode_ns, timing->submit_ns, timing->total_ns,
+		timing->submit_host_ns, timing->gpu_start_time, timing->gpu_end_time, true, true,
+		timing->presentation_status, timing->presented_time, timing->command_error ? "command-buffer-error" : NULL);
+	if (timing->presentation_token != nil)
+	{
+		[timing->presentation_token release];
+		track_release(state);
+	}
+	[timing->drawable release];
+	track_release(state);
+	track_release(state);
+	free(timing);
+}
+
+static void drain_completed_frames_locked(MetalControlState *state, bool closing)
+{
+	dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, INT64_C(1000000000));
+	FrameTiming **link = &state->completed_frames;
+	while (*link != NULL)
+	{
+		FrameTiming *timing = *link;
+		bool settled = timing->presentation_token == nil;
+		double presented_time = 0.0;
+		if (timing->presentation_token != nil)
+		{
+			settled = [timing->presentation_token snapshotPresentedTime:&presented_time];
+			if (!settled && closing) settled = [timing->presentation_token waitUntil:deadline];
+			if (settled) (void) [timing->presentation_token snapshotPresentedTime:&presented_time];
+		}
+		if (!settled && !closing)
+		{
+			link = &timing->next;
+			continue;
+		}
+		if (timing->presentation_token != nil && settled)
+		{
+			timing->presented_time = presented_time;
+			if (presented_time > 0.0)
+			{
+				timing->presentation_status = "presented";
+				state->counters[COUNTER_PRESENTATION_CALLBACKS]++;
+			}
+			else
+			{
+				timing->presentation_status = "dropped";
+				state->counters[COUNTER_PRESENTATION_DROPPED]++;
+			}
+		}
+		else if (timing->presentation_token != nil)
+		{
+			timing->presentation_status = "callback-timeout";
+			state->counters[COUNTER_PRESENTATION_TIMEOUTS]++;
+		}
+		*link = timing->next;
+		finalize_frame_locked(state, timing);
+	}
+}
+
+static void log_failed_attempt_locked(MetalControlState *state, uint64_t frame_id, NSUInteger width,
+	NSUInteger height, uint64_t ui_generate_ns, uint64_t total_ns, FrameOutcome outcome, const char *error)
+{
+	log_frame(state, frame_id, width, height, state->requested_mode, state->effective_mode, outcome,
+		ui_generate_ns, 0, 0, 0, total_ns, 0, 0.0, 0.0, false, false, "not-requested", 0.0, error);
+}
+
 JNIEXPORT jint JNICALL Java_rs117_hd_spikes_macos_control_MetalControlNative_nativeSkipSuspended(
 	JNIEnv *env, jclass type, jlong handle, jlong frame_id)
 {
@@ -577,12 +839,13 @@ JNIEXPORT jint JNICALL Java_rs117_hd_spikes_macos_control_MetalControlNative_nat
 	pthread_mutex_lock(&state->mutex);
 	if (!state->accepting)
 	{
+		log_failed_attempt_locked(state, (uint64_t) frame_id, 0, 0, 0, 0, OUTCOME_REJECTED, "renderer-closing");
 		pthread_mutex_unlock(&state->mutex);
 		return OUTCOME_REJECTED;
 	}
 	state->counters[COUNTER_SKIPPED_SUSPENDED]++;
 	log_frame(state, (uint64_t) frame_id, 0, 0, state->requested_mode, state->effective_mode,
-		OUTCOME_SKIPPED_SUSPENDED, 0, 0, 0, 0, 0, nil, false, false, NULL);
+		OUTCOME_SKIPPED_SUSPENDED, 0, 0, 0, 0, 0, 0, 0.0, 0.0, false, false, "not-requested", 0.0, NULL);
 	pthread_mutex_unlock(&state->mutex);
 	return OUTCOME_SKIPPED_SUSPENDED;
 }
@@ -597,8 +860,12 @@ JNIEXPORT jint JNICALL Java_rs117_hd_spikes_macos_control_MetalControlNative_nat
 		if (state == NULL) return OUTCOME_ERROR;
 		uint64_t frame_start = monotonic_ns();
 		pthread_mutex_lock(&state->mutex);
+		drain_completed_frames_locked(state, false);
 		if (!state->accepting || !state->ready)
 		{
+			log_failed_attempt_locked(state, (uint64_t) frame_id, width > 0 ? (NSUInteger) width : 0,
+				height > 0 ? (NSUInteger) height : 0, (uint64_t) ui_generate_ns,
+				(uint64_t) ui_generate_ns + monotonic_ns() - frame_start, OUTCOME_REJECTED, "renderer-not-ready");
 			pthread_mutex_unlock(&state->mutex);
 			return OUTCOME_REJECTED;
 		}
@@ -606,30 +873,38 @@ JNIEXPORT jint JNICALL Java_rs117_hd_spikes_macos_control_MetalControlNative_nat
 		{
 			state->counters[COUNTER_SKIPPED_SUSPENDED]++;
 			log_frame(state, (uint64_t) frame_id, 0, 0, state->requested_mode, state->effective_mode,
-				OUTCOME_SKIPPED_SUSPENDED, 0, 0, 0, 0, monotonic_ns() - frame_start, nil, false, false, NULL);
+				OUTCOME_SKIPPED_SUSPENDED, 0, 0, 0, 0, monotonic_ns() - frame_start,
+				0, 0.0, 0.0, false, false, "not-requested", 0.0, NULL);
 			pthread_mutex_unlock(&state->mutex);
 			return OUTCOME_SKIPPED_SUSPENDED;
 		}
 		id<MTLDevice> preferred = preferred_device(state);
 		if (preferred != nil && preferred != state->device)
 		{
-			if (state->inflight != 0)
+			if (state->inflight != 0 || state->acquisition_pending)
 			{
 				state->counters[COUNTER_SKIPPED_IN_FLIGHT]++;
 				log_frame(state, (uint64_t) frame_id, (NSUInteger) width, (NSUInteger) height,
 					state->requested_mode, state->effective_mode, OUTCOME_SKIPPED_IN_FLIGHT,
-					(uint64_t) ui_generate_ns, 0, 0, 0, (uint64_t) ui_generate_ns + monotonic_ns() - frame_start, nil, false, false, NULL);
+					(uint64_t) ui_generate_ns, 0, 0, 0, (uint64_t) ui_generate_ns + monotonic_ns() - frame_start,
+					0, 0.0, 0.0, false, false, "not-requested", 0.0, NULL);
 				pthread_mutex_unlock(&state->mutex);
 				return OUTCOME_SKIPPED_IN_FLIGHT;
 			}
+			release_ready_drawable_locked(state);
+			state->acquisition_generation++;
 			if (!build_device_objects_locked(state, preferred, @""))
 			{
 				state->ready = false;
+				log_failed_attempt_locked(state, (uint64_t) frame_id, (NSUInteger) width, (NSUInteger) height,
+					(uint64_t) ui_generate_ns, (uint64_t) ui_generate_ns + monotonic_ns() - frame_start,
+					OUTCOME_ERROR, "device-rebuild-failed");
 				pthread_mutex_unlock(&state->mutex);
 				return OUTCOME_ERROR;
 			}
 			state->counters[COUNTER_DEVICE_REBUILDS]++;
 			configure_present_mode_locked(state, state->requested_mode);
+			schedule_drawable_acquisition_locked(state);
 		}
 		int slot_index = find_free_slot(state);
 		if (slot_index < 0)
@@ -637,91 +912,90 @@ JNIEXPORT jint JNICALL Java_rs117_hd_spikes_macos_control_MetalControlNative_nat
 			state->counters[COUNTER_SKIPPED_IN_FLIGHT]++;
 			log_frame(state, (uint64_t) frame_id, (NSUInteger) width, (NSUInteger) height,
 				state->requested_mode, state->effective_mode, OUTCOME_SKIPPED_IN_FLIGHT,
-				(uint64_t) ui_generate_ns, 0, 0, 0, (uint64_t) ui_generate_ns + monotonic_ns() - frame_start, nil, false, false, NULL);
+				(uint64_t) ui_generate_ns, 0, 0, 0, (uint64_t) ui_generate_ns + monotonic_ns() - frame_start,
+				0, 0.0, 0.0, false, false, "not-requested", 0.0, NULL);
 			pthread_mutex_unlock(&state->mutex);
 			return OUTCOME_SKIPPED_IN_FLIGHT;
+		}
+		if (state->ready_drawable == nil)
+		{
+			bool acquisition_was_nil = state->acquisition_returned_nil;
+			state->acquisition_returned_nil = false;
+			schedule_drawable_acquisition_locked(state);
+			if (!acquisition_was_nil) state->counters[COUNTER_SKIPPED_IN_FLIGHT]++;
+			log_frame(state, (uint64_t) frame_id, (NSUInteger) width, (NSUInteger) height,
+				state->requested_mode, state->effective_mode,
+				acquisition_was_nil ? OUTCOME_NIL_DRAWABLE : OUTCOME_SKIPPED_IN_FLIGHT,
+				(uint64_t) ui_generate_ns, 0, 0, 0, (uint64_t) ui_generate_ns + monotonic_ns() - frame_start,
+				0, 0.0, 0.0, false, false, "not-requested", 0.0, NULL);
+			pthread_mutex_unlock(&state->mutex);
+			return acquisition_was_nil ? OUTCOME_NIL_DRAWABLE : OUTCOME_SKIPPED_IN_FLIGHT;
 		}
 		TextureSlot *slot = &state->slots[slot_index];
 		slot->busy = true;
 		if (!ensure_slot_texture_locked(state, slot_index, (NSUInteger) width, (NSUInteger) height))
 		{
 			slot->busy = false;
+			log_failed_attempt_locked(state, (uint64_t) frame_id, (NSUInteger) width, (NSUInteger) height,
+				(uint64_t) ui_generate_ns, (uint64_t) ui_generate_ns + monotonic_ns() - frame_start,
+				OUTCOME_ERROR, "texture-rebuild-failed");
 			pthread_mutex_unlock(&state->mutex);
-			return OUTCOME_ERROR;
-		}
-		jlong expected_length = (jlong) width * (jlong) height * 4;
-		if (ui_bytes == NULL || (*env)->GetArrayLength(env, ui_bytes) != expected_length)
-		{
-			slot->busy = false;
-			pthread_mutex_unlock(&state->mutex);
-			throw_exception(env, "java/lang/IllegalArgumentException", "UI upload must contain exact premultiplied BGRA bytes.");
 			return OUTCOME_ERROR;
 		}
 		uint64_t upload_start = monotonic_ns();
-		jbyte *bytes = (*env)->GetByteArrayElements(env, ui_bytes, NULL);
-		if (bytes == NULL)
+		if (!upload_java_ui(env, state, ui_bytes, slot->texture, (NSUInteger) width, (NSUInteger) height))
 		{
 			slot->busy = false;
+			log_failed_attempt_locked(state, (uint64_t) frame_id, (NSUInteger) width, (NSUInteger) height,
+				(uint64_t) ui_generate_ns, (uint64_t) ui_generate_ns + monotonic_ns() - frame_start,
+				OUTCOME_ERROR, "ui-upload-failed");
 			pthread_mutex_unlock(&state->mutex);
 			return OUTCOME_ERROR;
 		}
-		MTLRegion region = MTLRegionMake2D(0, 0, (NSUInteger) width, (NSUInteger) height);
-		[slot->texture replaceRegion:region mipmapLevel:0 withBytes:bytes bytesPerRow:(NSUInteger) width * 4];
-		(*env)->ReleaseByteArrayElements(env, ui_bytes, bytes, JNI_ABORT);
 		uint64_t upload_ns = monotonic_ns() - upload_start;
-		state->counters[COUNTER_UI_UPLOAD_BYTES] += (uint64_t) expected_length;
-
-		id<CAMetalDrawable> drawable = [state->layer nextDrawable];
-		if (drawable == nil)
-		{
-			slot->busy = false;
-			state->counters[COUNTER_NIL_DRAWABLE]++;
-			log_frame(state, (uint64_t) frame_id, (NSUInteger) width, (NSUInteger) height,
-				state->requested_mode, state->effective_mode, OUTCOME_NIL_DRAWABLE,
-				(uint64_t) ui_generate_ns, upload_ns, 0, 0, (uint64_t) ui_generate_ns + monotonic_ns() - frame_start, nil, false, false, NULL);
-			pthread_mutex_unlock(&state->mutex);
-			return OUTCOME_NIL_DRAWABLE;
-		}
+		state->counters[COUNTER_UI_UPLOAD_BYTES] += (uint64_t) width * (uint64_t) height * 4;
+		id<CAMetalDrawable> drawable = state->ready_drawable;
+		state->ready_drawable = nil;
+		schedule_drawable_acquisition_locked(state);
 
 		uint64_t encode_start = monotonic_ns();
 		id<MTLCommandBuffer> command_buffer = [state->queue commandBuffer];
 		if (command_buffer == nil)
 		{
 			slot->busy = false;
+			[drawable release];
+			track_release(state);
 			state->counters[COUNTER_COMMAND_ERRORS]++;
+			log_failed_attempt_locked(state, (uint64_t) frame_id, (NSUInteger) width, (NSUInteger) height,
+				(uint64_t) ui_generate_ns, (uint64_t) ui_generate_ns + monotonic_ns() - frame_start,
+				OUTCOME_ERROR, "command-buffer-unavailable");
 			pthread_mutex_unlock(&state->mutex);
 			return OUTCOME_ERROR;
 		}
-		MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
-		pass.colorAttachments[0].texture = drawable.texture;
-		pass.colorAttachments[0].loadAction = MTLLoadActionClear;
-		pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-		double pulse = 0.5 + 0.5 * sin((double) frame_id * 0.025);
-		pass.colorAttachments[0].clearColor = MTLClearColorMake(0.04 + pulse * 0.08, 0.08, 0.14 + pulse * 0.08, 1.0);
-		id<MTLRenderCommandEncoder> encoder = [command_buffer renderCommandEncoderWithDescriptor:pass];
-		if (encoder == nil)
+		if (!encode_scene(state, command_buffer, drawable.texture, slot->texture, (uint64_t) frame_id, false))
 		{
 			slot->busy = false;
+			[drawable release];
+			track_release(state);
 			state->counters[COUNTER_COMMAND_ERRORS]++;
+			log_failed_attempt_locked(state, (uint64_t) frame_id, (NSUInteger) width, (NSUInteger) height,
+				(uint64_t) ui_generate_ns, (uint64_t) ui_generate_ns + monotonic_ns() - frame_start,
+				OUTCOME_ERROR, "encoder-unavailable");
 			pthread_mutex_unlock(&state->mutex);
 			return OUTCOME_ERROR;
 		}
-		float phase = (float) ((double) frame_id * 0.0125);
-		[encoder setRenderPipelineState:state->triangle_pipeline];
-		[encoder setVertexBytes:&phase length:sizeof(phase) atIndex:0];
-		[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-		[encoder setRenderPipelineState:state->ui_pipeline];
-		[encoder setFragmentTexture:slot->texture atIndex:0];
-		[encoder setFragmentSamplerState:state->sampler atIndex:0];
-		[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
-		[encoder endEncoding];
 		uint64_t encode_ns = monotonic_ns() - encode_start;
 
 		FrameTiming *timing = calloc(1, sizeof(*timing));
 		if (timing == NULL)
 		{
 			slot->busy = false;
+			[drawable release];
+			track_release(state);
 			state->counters[COUNTER_INIT_ERRORS]++;
+			log_failed_attempt_locked(state, (uint64_t) frame_id, (NSUInteger) width, (NSUInteger) height,
+				(uint64_t) ui_generate_ns, (uint64_t) ui_generate_ns + monotonic_ns() - frame_start,
+				OUTCOME_ERROR, "timing-allocation-failed");
 			pthread_mutex_unlock(&state->mutex);
 			return OUTCOME_ERROR;
 		}
@@ -735,6 +1009,34 @@ JNIEXPORT jint JNICALL Java_rs117_hd_spikes_macos_control_MetalControlNative_nat
 		timing->ui_upload_ns = upload_ns;
 		timing->encode_ns = encode_ns;
 		timing->slot_index = slot_index;
+		timing->drawable = drawable;
+		bool callback_supported = !state->unsupported_present_callback &&
+			[drawable respondsToSelector:@selector(addPresentedHandler:)] &&
+			[drawable respondsToSelector:@selector(presentedTime)];
+		if (state->timeout_present_callback)
+		{
+			timing->presentation_status = "pending";
+			timing->presentation_token = [[RlhdPresentationToken alloc] init];
+			track_create(state);
+			callback_supported = false;
+		}
+		else if (state->dropped_present_callback)
+		{
+			timing->presentation_status = "dropped";
+			state->counters[COUNTER_PRESENTATION_DROPPED]++;
+			callback_supported = false;
+		}
+		else if (!callback_supported)
+		{
+			timing->presentation_status = "unsupported";
+		}
+		else
+		{
+			timing->presentation_status = "pending";
+			timing->presentation_token = [[RlhdPresentationToken alloc] init];
+			track_create(state);
+		}
+		state->pending_frame_callbacks++;
 		state->inflight++;
 		state->counters[COUNTER_SUBMITTED]++;
 		state->counters[COUNTER_PRESENT_REQUESTED]++;
@@ -742,29 +1044,39 @@ JNIEXPORT jint JNICALL Java_rs117_hd_spikes_macos_control_MetalControlNative_nat
 		{
 			state->counters[COUNTER_MAX_IN_FLIGHT] = state->inflight;
 		}
+		if (callback_supported)
+		{
+			RlhdPresentationToken *presentation_token = timing->presentation_token;
+			[drawable addPresentedHandler:^(id<MTLDrawable> presented) {
+				[presentation_token markPresentedTime:presented.presentedTime];
+			}];
+		}
 		[command_buffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
 			@autoreleasepool
 			{
 				pthread_mutex_lock(&state->mutex);
+				timing->gpu_done = true;
+				timing->gpu_start_time = completed.GPUStartTime;
+				timing->gpu_end_time = completed.GPUEndTime;
 				if (completed.status == MTLCommandBufferStatusError)
 				{
 					state->counters[COUNTER_COMMAND_ERRORS]++;
+					timing->command_error = true;
 				}
 				state->counters[COUNTER_COMPLETED]++;
 				state->slots[timing->slot_index].busy = false;
 				if (state->inflight > 0) state->inflight--;
-				log_frame(state, timing->frame_id, timing->width, timing->height,
-					timing->requested_mode, timing->effective_mode, OUTCOME_SUBMITTED,
-					timing->ui_generate_ns, timing->ui_upload_ns, timing->encode_ns, timing->submit_ns, timing->total_ns,
-					completed, true, true, completed.status == MTLCommandBufferStatusError ? "error" : NULL);
-				track_release(state);
-				free(timing);
+				timing->next = state->completed_frames;
+				state->completed_frames = timing;
+				if (state->pending_frame_callbacks > 0) state->pending_frame_callbacks--;
+				drain_completed_frames_locked(state, false);
 				pthread_cond_broadcast(&state->drained);
 				pthread_mutex_unlock(&state->mutex);
 			}
 		}];
 		uint64_t submit_start = monotonic_ns();
-		[command_buffer presentDrawable:drawable];
+		timing->submit_host_ns = (uint64_t) (CACurrentMediaTime() * 1000000000.0);
+		if (!state->bypass_present) [command_buffer presentDrawable:drawable];
 		[command_buffer commit];
 		timing->submit_ns = monotonic_ns() - submit_start;
 		timing->total_ns = timing->ui_generate_ns + monotonic_ns() - frame_start;
@@ -822,7 +1134,7 @@ static bool channel_near(uint8_t actual, int expected)
 }
 
 JNIEXPORT jboolean JNICALL Java_rs117_hd_spikes_macos_control_MetalControlNative_nativeRunReadbackCheck(
-	JNIEnv *env, jclass type, jlong handle)
+	JNIEnv *env, jclass type, jlong handle, jbyteArray first_ui_bytes, jbyteArray second_ui_bytes)
 {
 	(void) type;
 	@autoreleasepool
@@ -856,38 +1168,46 @@ JNIEXPORT jboolean JNICALL Java_rs117_hd_spikes_macos_control_MetalControlNative
 		}
 		track_create(state);
 		track_create(state);
-		uint8_t ui[8 * 8 * 4];
-		write_synthetic_ui(ui, width, height, 0);
-		[ui_texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:ui bytesPerRow:width * 4];
-		id<MTLCommandBuffer> command_buffer = [state->queue commandBuffer];
-		MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
-		pass.colorAttachments[0].texture = render_texture;
-		pass.colorAttachments[0].loadAction = MTLLoadActionClear;
-		pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-		pass.colorAttachments[0].clearColor = MTLClearColorMake(0.10, 0.15, 0.20, 1.0);
-		id<MTLRenderCommandEncoder> encoder = [command_buffer renderCommandEncoderWithDescriptor:pass];
-		float phase = 0.0f;
-		[encoder setRenderPipelineState:state->triangle_pipeline];
-		[encoder setVertexBytes:&phase length:sizeof(phase) atIndex:0];
-		[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-		[encoder setRenderPipelineState:state->ui_pipeline];
-		[encoder setFragmentTexture:ui_texture atIndex:0];
-		[encoder setFragmentSamplerState:state->sampler atIndex:0];
-		[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
-		[encoder endEncoding];
-		[command_buffer commit];
-		[command_buffer waitUntilCompleted];
-		uint8_t result[8 * 8 * 4];
-		[render_texture getBytes:result bytesPerRow:width * 4 fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+		uint8_t first_result[8 * 8 * 4];
+		uint8_t second_result[8 * 8 * 4];
+		jbyteArray uploads[2] = {first_ui_bytes, second_ui_bytes};
+		uint8_t *results[2] = {first_result, second_result};
+		bool commands_valid = true;
+		for (int pass_index = 0; pass_index < 2; pass_index++)
+		{
+			if (!upload_java_ui(env, state, uploads[pass_index], ui_texture, width, height))
+			{
+				commands_valid = false;
+				break;
+			}
+			id<MTLCommandBuffer> command_buffer = [state->queue commandBuffer];
+			if (command_buffer == nil || !encode_scene(state, command_buffer, render_texture, ui_texture,
+				(uint64_t) (7 + pass_index), true))
+			{
+				commands_valid = false;
+				break;
+			}
+			[command_buffer commit];
+			[command_buffer waitUntilCompleted];
+			if (command_buffer.status != MTLCommandBufferStatusCompleted)
+			{
+				commands_valid = false;
+				break;
+			}
+			[render_texture getBytes:results[pass_index] bytesPerRow:width * 4
+				fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+		}
 		NSUInteger top_right = (1 * width + 6) * 4;
 		NSUInteger bottom_left = (6 * width + 1) * 4;
 		NSUInteger center = (3 * width + 3) * 4;
-		bool valid = command_buffer.status == MTLCommandBufferStatusCompleted &&
-			channel_near(result[top_right], 26) && channel_near(result[top_right + 1], 19) &&
-			channel_near(result[top_right + 2], 140) && channel_near(result[top_right + 3], 255) &&
-			channel_near(result[bottom_left], 255) && channel_near(result[bottom_left + 1], 0) &&
-			channel_near(result[bottom_left + 2], 0) && channel_near(result[bottom_left + 3], 255) &&
-			result[center + 1] > 150 && result[center + 2] < 100;
+		NSUInteger animated = (6 * width + 6) * 4;
+		bool valid = commands_valid &&
+			channel_near(first_result[top_right], 26) && channel_near(first_result[top_right + 1], 19) &&
+			channel_near(first_result[top_right + 2], 140) && channel_near(first_result[top_right + 3], 255) &&
+			channel_near(first_result[bottom_left], 255) && channel_near(first_result[bottom_left + 1], 0) &&
+			channel_near(first_result[bottom_left + 2], 0) && channel_near(first_result[bottom_left + 3], 255) &&
+			first_result[center + 1] > 150 && first_result[center + 2] < 100 &&
+			memcmp(&first_result[animated], &second_result[animated], 4) != 0;
 		[render_texture release];
 		[ui_texture release];
 		track_release(state);
@@ -897,35 +1217,65 @@ JNIEXPORT jboolean JNICALL Java_rs117_hd_spikes_macos_control_MetalControlNative
 	}
 }
 
-JNIEXPORT jlongArray JNICALL Java_rs117_hd_spikes_macos_control_MetalControlNative_nativeClose(
-	JNIEnv *env, jclass type, jlong handle)
+JNIEXPORT void JNICALL Java_rs117_hd_spikes_macos_control_MetalControlNative_nativeClose(
+	JNIEnv *env, jclass type, jlong handle, jlongArray final_counters)
 {
 	(void) type;
 	@autoreleasepool
 	{
 		MetalControlState *state = state_from_handle(env, handle);
-		if (state == NULL) return NULL;
+		if (state == NULL) return;
+		if (final_counters == NULL || (*env)->GetArrayLength(env, final_counters) != COUNTER_COUNT)
+		{
+			throw_exception(env, "java/lang/IllegalArgumentException", "Final counter storage has the wrong length.");
+			return;
+		}
+		jlong *counter_storage = (*env)->GetLongArrayElements(env, final_counters, NULL);
+		if (counter_storage == NULL) return;
 		pthread_mutex_lock(&state->mutex);
 		if (!state->accepting)
 		{
 			pthread_mutex_unlock(&state->mutex);
+			(*env)->ReleaseLongArrayElements(env, final_counters, counter_storage, JNI_ABORT);
 			throw_exception(env, "java/lang/IllegalStateException", "Metal control renderer is already closing.");
-			return NULL;
+			return;
+		}
+		if (state->fail_close_preconsume_once)
+		{
+			state->fail_close_preconsume_once = false;
+			pthread_mutex_unlock(&state->mutex);
+			(*env)->ReleaseLongArrayElements(env, final_counters, counter_storage, JNI_ABORT);
+			throw_exception(env, "java/lang/IllegalStateException", "Injected pre-consumption close failure.");
+			return;
 		}
 		state->accepting = false;
-		while (state->inflight != 0)
+		state->acquisition_generation++;
+		while (state->acquisition_pending || state->inflight != 0 || state->pending_frame_callbacks != 0)
 		{
 			pthread_cond_wait(&state->drained, &state->mutex);
 		}
+		drain_completed_frames_locked(state, true);
 		state->ready = false;
+		release_ready_drawable_locked(state);
 		__block CAMetalLayer *layer = state->layer;
 		__block id<MTLDevice> device = state->device;
 		dispatch_main_sync(^{
 			if (layer.device == device) layer.device = nil;
+			[layer release];
 		});
 		release_device_objects_locked(state);
 		state->layer = nil;
 		track_release(state);
+		if (state->drawable_queue != NULL)
+		{
+			dispatch_release(state->drawable_queue);
+			state->drawable_queue = NULL;
+			track_release(state);
+		}
+		track_release(state);
+		bool has_errors = state->counters[COUNTER_INIT_ERRORS] != 0 ||
+			state->counters[COUNTER_SHADER_ERRORS] != 0 || state->counters[COUNTER_PIPELINE_ERRORS] != 0 ||
+			state->counters[COUNTER_COMMAND_ERRORS] != 0;
 		if (state->log != NULL)
 		{
 			fprintf(state->log,
@@ -933,16 +1283,16 @@ JNIEXPORT jlongArray JNICALL Java_rs117_hd_spikes_macos_control_MetalControlNati
 				"\"timestamp_ns\":%llu,\"requested_present_mode\":\"%s\",\"effective_present_mode\":\"%s\",\"counters\":",
 				(unsigned long long) monotonic_ns(), present_mode_name(state->requested_mode), present_mode_name(state->effective_mode));
 			write_counters(state->log, state->counters);
-			fprintf(state->log, ",\"error\":%s}\n", state->counters[COUNTER_COMMAND_ERRORS] == 0 ? "null" : "\"command-buffer-error\"");
+			fprintf(state->log, ",\"error\":%s}\n", has_errors ? "\"renderer-errors\"" : "null");
 			fflush(state->log);
 			fclose(state->log);
 			state->log = NULL;
 		}
-		jlongArray final_counters = counters_array(env, state->counters);
+		for (int index = 0; index < COUNTER_COUNT; index++) counter_storage[index] = (jlong) state->counters[index];
 		pthread_mutex_unlock(&state->mutex);
 		pthread_cond_destroy(&state->drained);
 		pthread_mutex_destroy(&state->mutex);
 		free(state);
-		return final_counters;
+		(*env)->ReleaseLongArrayElements(env, final_counters, counter_storage, 0);
 	}
 }

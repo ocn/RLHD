@@ -10,9 +10,11 @@ public final class MetalControlRenderer implements AutoCloseable
 	private enum Phase { RUNNING, CLOSING, CLOSED }
 
 	private final NativeRendererAccess nativeAccess;
+	private final CounterMaterializer counterMaterializer;
 	private long stateHandle;
 	private Phase phase = Phase.RUNNING;
 	private MetalControlCounters finalCounters;
+	private long[] finalCounterValues;
 	private byte[] uiBytes = new byte[0];
 	private int uiWidth;
 	private int uiHeight;
@@ -20,12 +22,19 @@ public final class MetalControlRenderer implements AutoCloseable
 	public MetalControlRenderer(MacMetalSurface surface, Path timingLog, PresentMode presentMode)
 	{
 		this(MetalControlNative.INSTANCE, Objects.requireNonNull(surface, "surface").metalLayerHandle(), timingLog, presentMode,
-			System.getProperty("rlhd.spike.metal.failure", ""));
+			System.getProperty("rlhd.spike.metal.failure", ""), MetalControlCounters::new);
 	}
 
 	MetalControlRenderer(NativeRendererAccess nativeAccess, long layerHandle, Path timingLog, PresentMode presentMode, String failureStage)
 	{
+		this(nativeAccess, layerHandle, timingLog, presentMode, failureStage, MetalControlCounters::new);
+	}
+
+	MetalControlRenderer(NativeRendererAccess nativeAccess, long layerHandle, Path timingLog, PresentMode presentMode,
+		String failureStage, CounterMaterializer counterMaterializer)
+	{
 		this.nativeAccess = Objects.requireNonNull(nativeAccess, "nativeAccess");
+		this.counterMaterializer = Objects.requireNonNull(counterMaterializer, "counterMaterializer");
 		Objects.requireNonNull(timingLog, "timingLog");
 		Objects.requireNonNull(presentMode, "presentMode");
 		stateHandle = nativeAccess.create(layerHandle, timingLog.toAbsolutePath().toString(), presentMode, failureStage == null ? "" : failureStage);
@@ -37,9 +46,9 @@ public final class MetalControlRenderer implements AutoCloseable
 		if (!nativeAccess.ready(stateHandle))
 		{
 			long failedHandle = stateHandle;
+			nativeAccess.close(failedHandle, new long[MetalControlCounters.FIELD_COUNT]);
 			stateHandle = 0;
 			phase = Phase.CLOSED;
-			nativeAccess.close(failedHandle);
 			throw new IllegalStateException("Native Metal control initialization failed; inspect the timing log counters.");
 		}
 	}
@@ -73,6 +82,11 @@ public final class MetalControlRenderer implements AutoCloseable
 		{
 			return finalCounters;
 		}
+		if (phase == Phase.CLOSED && finalCounterValues != null)
+		{
+			finalCounters = counterMaterializer.materialize(finalCounterValues.clone());
+			return finalCounters;
+		}
 		ensureRunning();
 		return new MetalControlCounters(nativeAccess.counters(stateHandle));
 	}
@@ -80,7 +94,11 @@ public final class MetalControlRenderer implements AutoCloseable
 	public synchronized boolean runReadbackCheck()
 	{
 		ensureRunning();
-		return nativeAccess.runReadbackCheck(stateHandle);
+		byte[] first = new byte[SyntheticUi.byteCount(8, 8)];
+		byte[] second = new byte[first.length];
+		SyntheticUi.fillPremultipliedBgra(first, 8, 8, 7);
+		SyntheticUi.fillPremultipliedBgra(second, 8, 8, 8);
+		return nativeAccess.runReadbackCheck(stateHandle, first, second);
 	}
 
 	@Override
@@ -88,9 +106,10 @@ public final class MetalControlRenderer implements AutoCloseable
 	{
 		ensureRunning();
 		phase = Phase.CLOSING;
+		long[] rawCounters = new long[MetalControlCounters.FIELD_COUNT];
 		try
 		{
-			finalCounters = new MetalControlCounters(nativeAccess.close(stateHandle));
+			nativeAccess.close(stateHandle, rawCounters);
 		}
 		catch (RuntimeException | Error ex)
 		{
@@ -98,10 +117,12 @@ public final class MetalControlRenderer implements AutoCloseable
 			throw ex;
 		}
 		stateHandle = 0;
+		phase = Phase.CLOSED;
+		finalCounterValues = rawCounters;
 		uiBytes = new byte[0];
 		uiWidth = 0;
 		uiHeight = 0;
-		phase = Phase.CLOSED;
+		finalCounters = counterMaterializer.materialize(rawCounters.clone());
 	}
 
 	private void ensureUiBuffer(int width, int height)
@@ -120,5 +141,10 @@ public final class MetalControlRenderer implements AutoCloseable
 		{
 			throw new IllegalStateException("Metal control renderer is not running.");
 		}
+	}
+
+	interface CounterMaterializer
+	{
+		MetalControlCounters materialize(long[] values);
 	}
 }

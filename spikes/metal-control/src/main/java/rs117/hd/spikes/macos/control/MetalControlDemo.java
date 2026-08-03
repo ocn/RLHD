@@ -39,6 +39,7 @@ public final class MetalControlDemo
 		MacMetalSurface surface = new MacMetalSurface();
 		MetalControlRenderer renderer = null;
 		GraphicsDevice display = frame.getGraphicsConfiguration().getDevice();
+		Throwable primaryFailure = null;
 		try
 		{
 			surface.attach(canvas);
@@ -109,23 +110,70 @@ public final class MetalControlDemo
 			System.out.println("requested/effective presentation behavior is recorded in " + log.toAbsolutePath());
 			System.out.println(beforeClose);
 		}
+		catch (Exception | Error ex)
+		{
+			primaryFailure = ex;
+			throw ex;
+		}
 		finally
 		{
-			if (renderer != null)
+			cleanup(renderer, surface, frame, primaryFailure);
+		}
+	}
+
+	private static void cleanup(MetalControlRenderer renderer, MacMetalSurface surface, Frame frame,
+		Throwable primaryFailure) throws Exception
+	{
+		Throwable cleanupFailure = null;
+		if (renderer != null)
+		{
+			try
 			{
 				renderer.close();
 				System.out.println("after close: " + renderer.counters());
 			}
-			try
+			catch (Throwable ex)
 			{
-				surface.detach();
-			}
-			finally
-			{
-				surface.close();
-				EventQueue.invokeAndWait(frame::dispose);
+				cleanupFailure = ex;
 			}
 		}
+		cleanupFailure = attempt(cleanupFailure, surface::detach);
+		cleanupFailure = attempt(cleanupFailure, surface::close);
+		cleanupFailure = attempt(cleanupFailure, () -> EventQueue.invokeAndWait(frame::dispose));
+		if (cleanupFailure != null)
+		{
+			if (primaryFailure != null)
+			{
+				primaryFailure.addSuppressed(cleanupFailure);
+			}
+			else if (cleanupFailure instanceof Exception)
+			{
+				throw (Exception) cleanupFailure;
+			}
+			else
+			{
+				throw (Error) cleanupFailure;
+			}
+		}
+	}
+
+	private static Throwable attempt(Throwable existing, CheckedAction action)
+	{
+		try
+		{
+			action.run();
+		}
+		catch (Throwable ex)
+		{
+			if (existing == null) return ex;
+			existing.addSuppressed(ex);
+		}
+		return existing;
+	}
+
+	private interface CheckedAction
+	{
+		void run() throws Exception;
 	}
 
 	private static void resizeSurface(MacMetalSurface surface, Frame frame, Canvas canvas)

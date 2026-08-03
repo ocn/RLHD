@@ -4,7 +4,7 @@ import java.util.Arrays;
 
 public final class MetalControlCounters
 {
-	static final int FIELD_COUNT = 16;
+	static final int FIELD_COUNT = 22;
 
 	private final long[] values;
 
@@ -33,6 +33,12 @@ public final class MetalControlCounters
 	public long liveNativeObjects() { return values[13]; }
 	public long highWaterNativeObjects() { return values[14]; }
 	public long maxInFlight() { return values[15]; }
+	public long presentationCallbacks() { return values[16]; }
+	public long presentationDropped() { return values[17]; }
+	public long presentationTimeouts() { return values[18]; }
+	public long presentModeDivergences() { return values[19]; }
+	public long drawableAcquisitionRequests() { return values[20]; }
+	public long drawableAcquisitionCompletions() { return values[21]; }
 
 	public long inFlight()
 	{

@@ -48,16 +48,18 @@ sourceSets {
 	metalControlSpikeTest {
 		java.srcDir 'spikes/metal-control/src/test/java'
 		compileClasspath += sourceSets.macSurfaceSpike.output + sourceSets.metalControlSpike.output
-		runtimeClasspath += output + compileClasspath
+		runtimeClasspath += output + compileClasspath + sourceSets.metalControlSpike.runtimeClasspath
 	}
 }
 
 configurations {
 	macSurfaceSpikeTestImplementation.extendsFrom testImplementation
 	macSurfaceSpikeTestRuntimeOnly.extendsFrom testRuntimeOnly
-	metalControlSpikeTestImplementation.extendsFrom testImplementation
-	metalControlSpikeTestRuntimeOnly.extendsFrom testRuntimeOnly
+	metalControlSpikeTestImplementation.extendsFrom metalControlSpikeImplementation
 }
+
+dependencies.add('metalControlSpikeImplementation', 'com.google.code.gson:gson:2.14.0')
+dependencies.add('metalControlSpikeTestImplementation', 'junit:junit:4.13.2')
 
 def macSurfaceSpikeDir = file('spikes/macos-surface')
 def macSurfaceNativeDir = layout.buildDirectory.dir('spikes/macos-surface/native')
