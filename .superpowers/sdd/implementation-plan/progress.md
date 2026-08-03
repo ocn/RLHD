@@ -34,7 +34,7 @@
 
 ## Task 2 — One opaque static zone through Vulkan
 
-- Status: Task 2A independently approved; controller verification pending; Task 2B gated.
+- Status: Task 2A independently approved and controller-verified; Task 2B gated.
 - Authorization: user explicitly requested proceeding to Task 2.
 - Scope split: Task 2A may implement API-neutral frame data, prepared-zone Vulkan upload/resource ownership, real opaque shaders, offline compilation/reflection, and deterministic non-presenting tests. Task 2B owns live surface/swapchain/presentation/readback and validation-layer acceptance.
 - Safety: no window, CAMetalLayer, Vulkan surface, swapchain, drawable, fullscreen transition, or presentation call may execute on this host.
@@ -67,3 +67,11 @@
 - Reviewed head: `6c9e7604`.
 - Verdict: `APPROVED`; no Critical, Important, or Minor findings.
 - Confirmed: immutable scene-base/frame contract, exact parsed shader reflection with mutation rejection, negative-viewport winding/culling, zero-extent no-work evidence, production dependency/resource isolation, and explicit Task 2B `NOT RUN` boundary.
+
+### Task 2A controller gate
+
+- Approved code head: `6c9e7604`.
+- Fresh command: `./gradlew --no-daemon --console=plain --rerun-tasks vulkanOpaqueSliceCheck test --tests '*PreparedZoneGeometryTest' --tests 'rs117.hd.renderer.PreparedFrameTest' --tests 'rs117.hd.renderer.RendererBackendContractTest'`.
+- Result: `BUILD SUCCESSFUL`; 25/25 tasks executed, all four shaders freshly compiled/reflected/validated, exact reflection and production isolation passed, and focused tests passed.
+- Safety: no integration, loader, device, surface, swapchain, window, fullscreen, submit, or presentation task ran.
+- Boundary: Task 2A is complete as an offline partial slice. Full Task 2 remains incomplete while Task 2B is `NOT RUN`.
