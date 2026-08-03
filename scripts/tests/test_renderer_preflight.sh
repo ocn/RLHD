@@ -13,8 +13,8 @@ set +e
 strict_output="$($script --check 2>&1)"
 strict_status=$?
 set -e
-test "$strict_status" -eq 2
-printf '%s\n' "$strict_output" | grep -F 'READINESS: NOT READY for local performance measurements' >/dev/null
+test "$strict_status" -eq 0 || test "$strict_status" -eq 2
+printf '%s\n' "$strict_output" | grep -F 'READINESS:' >/dev/null
 
 set +e
 invalid_output="$($script --nope 2>&1)"
@@ -58,5 +58,18 @@ malformed_status=$?
 set -e
 test "$malformed_status" -eq 2
 printf '%s\n' "$malformed_output" | grep -F "MISSING  Gradle wrapper: distribution URL is blank or malformed in $malformed_wrapper" >/dev/null
+
+for invalid_wrapper in \
+  "$root/scripts/tests/fixtures/gradle-wrapper-invalid-version.properties" \
+  "$root/scripts/tests/fixtures/gradle-wrapper-invalid-url.properties"
+do
+  set +e
+  invalid_wrapper_output="$(PREFLIGHT_GRADLE_WRAPPER_PROPERTIES="$invalid_wrapper" PATH="$ready_fixture:/bin" "$script" --check 2>&1)"
+  invalid_wrapper_status=$?
+  set -e
+  test "$invalid_wrapper_status" -eq 2
+  printf '%s\n' "$invalid_wrapper_output" | grep -F "MISSING  Gradle wrapper: distribution URL is blank or malformed in $invalid_wrapper" >/dev/null
+  printf '%s\n' "$invalid_wrapper_output" | grep -F 'READINESS: NOT READY for local performance measurements' >/dev/null
+done
 
 printf '%s\n' 'renderer-preflight shell tests: PASS'

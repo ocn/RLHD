@@ -19,6 +19,11 @@ note() { printf 'INFO  %s: %s\n' "$1" "$2"; }
 fail() { printf 'MISSING  %s: %s\n' "$1" "$2"; missing=1; }
 command_version() { "$1" "$2" 2>&1 | sed -n '1p'; }
 
+script_path="${BASH_SOURCE[0]}"
+case "$script_path" in /*) ;; *) script_path="$(pwd)/$script_path" ;; esac
+script_dir="$(cd "${script_path%/*}" && pwd)"
+repo_root="$(cd "$script_dir/.." && pwd)"
+
 printf '%s\n' 'RLHD modern-renderer preflight (read-only)'
 
 os_name="$(uname -s 2>/dev/null || printf unknown)"
@@ -52,16 +57,25 @@ else
   fail 'JVM' 'java is not on PATH'
 fi
 
-wrapper_properties="${PREFLIGHT_GRADLE_WRAPPER_PROPERTIES:-gradle/wrapper/gradle-wrapper.properties}"
+wrapper_properties="${PREFLIGHT_GRADLE_WRAPPER_PROPERTIES:-$repo_root/gradle/wrapper/gradle-wrapper.properties}"
 if [ -r "$wrapper_properties" ]; then
   wrapper_url="$(sed -n 's/^distributionUrl=//p' "$wrapper_properties" | sed -n '1p')"
+  wrapper_url="${wrapper_url//\\:/:}"
   wrapper_file="${wrapper_url##*/}"
+  wrapper_remainder="${wrapper_url#*://}"
+  wrapper_host="${wrapper_remainder%%/*}"
   case "$wrapper_file" in
     gradle-*-bin.zip) gradle_version="${wrapper_file#gradle-}"; gradle_version="${gradle_version%-bin.zip}" ;;
     gradle-*-all.zip) gradle_version="${wrapper_file#gradle-}"; gradle_version="${gradle_version%-all.zip}" ;;
     *) gradle_version='' ;;
   esac
-  if [ -n "$gradle_version" ]; then
+  gradle_version="$(printf '%s\n' "$gradle_version" | sed -n '/^[0-9][0-9]*\.[0-9][0-9]*\(\.[0-9][0-9]*\)\{0,1\}\(-[A-Za-z0-9][A-Za-z0-9.-]*\)\{0,1\}$/p')"
+  case "$wrapper_url" in
+    http://*|https://*) ;;
+    *) gradle_version='' ;;
+  esac
+  case "$wrapper_url" in *[[:space:]]*) gradle_version='' ;; esac
+  if [ -n "$wrapper_host" ] && [ "$wrapper_remainder" != "$wrapper_host" ] && [ -n "$gradle_version" ]; then
     pass 'Gradle wrapper' "version $gradle_version ($wrapper_file)"
   else
     fail 'Gradle wrapper' "distribution URL is blank or malformed in $wrapper_properties"

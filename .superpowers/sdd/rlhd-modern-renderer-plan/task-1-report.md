@@ -31,3 +31,11 @@ No renderer production code, dependencies, installed tools, or external reposito
 - A Java invocation must exit successfully and report both `java.version` and `os.arch`; otherwise it is `MISSING` and cannot yield ready status.
 - `scripts/tests/test_renderer_preflight.sh` now requires the current host's `--check` result to be `2`, and deterministically proves a ready Linux/toolchain fixture (`0`), a broken Java fixture (`2`), and malformed Gradle wrapper metadata (`2`).
 - Fresh command: `bash -n scripts/renderer-preflight.sh scripts/tests/test_renderer_preflight.sh && scripts/tests/test_renderer_preflight.sh` — exit `0`, `renderer-preflight shell tests: PASS`.
+
+## Review-fix verification: Round 2
+
+- The default wrapper properties path is resolved from `scripts/renderer-preflight.sh` to the repository root, independent of caller working directory.
+- `distributionUrl` must use `http` or `https`, contain a non-empty host and path, have no whitespace, and end in `gradle-<semver-like-version>-{bin,all}.zip`. The parser accepts the repository's `8.10` URL and rejects blank metadata, `gradle-not-a-version-bin.zip`, and a `file:` URL. This matches the [Gradle Wrapper distribution URL format](https://docs.gradle.org/current/userguide/gradle_wrapper.html).
+- Live-host strict status is environment-portable (`0` or `2`); isolated fixtures continue to require exact ready (`0`) and not-ready (`2`) results.
+- From repository root: `scripts/tests/test_renderer_preflight.sh` — exit `0`, `renderer-preflight shell tests: PASS`.
+- From `scripts/tests`: `./test_renderer_preflight.sh` — exit `0`, `renderer-preflight shell tests: PASS`.
