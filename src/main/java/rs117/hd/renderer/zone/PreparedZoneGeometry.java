@@ -3,10 +3,12 @@ package rs117.hd.renderer.zone;
 import java.nio.IntBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Set;
 
+/**
+ * Immutable prepared geometry. The package-private constructor takes exclusive ownership of the supplied buffers;
+ * callers must not retain or mutate aliases after construction.
+ */
 public final class PreparedZoneGeometry {
 	public static final int PACKED_VERTEX_STRIDE_INTS = 7;
 	public static final int FACE_METADATA_STRIDE_INTS = 9;
@@ -16,14 +18,14 @@ public final class PreparedZoneGeometry {
 	private final IntBuffer alphaVertices;
 	private final IntBuffer faceMetadata;
 	private final List<PreparedDrawRange> drawRanges;
-	private final List<Integer> materialIds;
+	private final List<PreparedFaceMaterials> faceMaterials;
 
 	PreparedZoneGeometry(IntBuffer opaqueVertices, IntBuffer alphaVertices, IntBuffer faceMetadata, int[] levelOffsets) {
-		this.opaqueVertices = copyWritten(opaqueVertices);
-		this.alphaVertices = copyWritten(alphaVertices);
-		this.faceMetadata = copyWritten(faceMetadata);
-		materialIds = collectMaterialIds(this.faceMetadata);
-		drawRanges = buildDrawRanges(levelOffsets, commonMaterialId(materialIds));
+		this.opaqueVertices = takeOwnershipOfWritten(opaqueVertices);
+		this.alphaVertices = takeOwnershipOfWritten(alphaVertices);
+		this.faceMetadata = takeOwnershipOfWritten(faceMetadata);
+		faceMaterials = buildFaceMaterials(this.faceMetadata);
+		drawRanges = buildDrawRanges(levelOffsets);
 	}
 
 	public IntBuffer opaqueVertices() {
@@ -54,36 +56,32 @@ public final class PreparedZoneGeometry {
 		return drawRanges;
 	}
 
-	public List<Integer> materialIds() {
-		return materialIds;
+	public List<PreparedFaceMaterials> faceMaterials() {
+		return faceMaterials;
 	}
 
-	private static IntBuffer copyWritten(IntBuffer source) {
+	private static IntBuffer takeOwnershipOfWritten(IntBuffer source) {
 		if (source == null)
 			return IntBuffer.allocate(0).asReadOnlyBuffer();
-		IntBuffer written = source.duplicate();
-		written.flip();
-		IntBuffer copy = IntBuffer.allocate(written.remaining());
-		copy.put(written).flip();
-		return copy.asReadOnlyBuffer();
+		source.flip();
+		return source.slice().asReadOnlyBuffer();
 	}
 
-	private static List<Integer> collectMaterialIds(IntBuffer metadata) {
-		Set<Integer> ids = new LinkedHashSet<>();
+	private static List<PreparedFaceMaterials> buildFaceMaterials(IntBuffer metadata) {
+		List<PreparedFaceMaterials> materials = new ArrayList<>();
 		for (int face = 0; face < metadata.remaining() / FACE_METADATA_STRIDE_INTS; face++) {
 			int materialOffset = face * FACE_METADATA_STRIDE_INTS + 3;
-			ids.add(metadata.get(materialOffset) >>> MATERIAL_INDEX_SHIFT);
-			ids.add(metadata.get(materialOffset + 1) >>> MATERIAL_INDEX_SHIFT);
-			ids.add(metadata.get(materialOffset + 2) >>> MATERIAL_INDEX_SHIFT);
+			materials.add(new PreparedFaceMaterials(
+				face * 3,
+				metadata.get(materialOffset) >>> MATERIAL_INDEX_SHIFT,
+				metadata.get(materialOffset + 1) >>> MATERIAL_INDEX_SHIFT,
+				metadata.get(materialOffset + 2) >>> MATERIAL_INDEX_SHIFT
+			));
 		}
-		return Collections.unmodifiableList(new ArrayList<>(ids));
+		return Collections.unmodifiableList(materials);
 	}
 
-	private static int commonMaterialId(List<Integer> materialIds) {
-		return materialIds.size() == 1 ? materialIds.get(0) : PreparedDrawRange.MIXED_MATERIAL_ID;
-	}
-
-	private static List<PreparedDrawRange> buildDrawRanges(int[] levelOffsets, int materialId) {
+	private static List<PreparedDrawRange> buildDrawRanges(int[] levelOffsets) {
 		List<PreparedDrawRange> ranges = new ArrayList<>();
 		int start = 0;
 		for (int end : levelOffsets) {
@@ -91,7 +89,6 @@ public final class PreparedZoneGeometry {
 				ranges.add(new PreparedDrawRange(
 					start / PACKED_VERTEX_STRIDE_INTS,
 					(end - start) / PACKED_VERTEX_STRIDE_INTS,
-					materialId,
 					PreparedDrawRange.Pass.OPAQUE
 				));
 				start = end;

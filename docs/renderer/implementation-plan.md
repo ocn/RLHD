@@ -24,7 +24,7 @@
 
 | Owner | Responsibility |
 | --- | --- |
-| 117HD scene preparation | Convert RuneLite scene/model data into immutable CPU vertex/UV/normal buffers, draw ranges, semantic material IDs, camera/viewport/light values. |
+| 117HD scene preparation | Convert RuneLite scene/model data into immutable CPU packed vertex/face streams, opaque draw ranges, an exact per-face material association, and camera/viewport/light values. |
 | 117HD backend adapter | Upload prepared data; translate semantic passes into OpenGL or Vulkan resources and commands. |
 | RuneLite | `DrawCallbacks`, render-thread lifecycle, GPU flags, Canvas, and UI pixel production. |
 | rlawt or RuneLite core | Backend-neutral native AWT surface lifecycle and packaged native bridge, if accepted. |
@@ -39,16 +39,23 @@ interface ZoneGeometrySink {
 }
 
 final class PreparedZoneGeometry {
-    IntBuffer vertices();
-    FloatBuffer uvs();
-    FloatBuffer normals();
+    IntBuffer opaqueVertices();
+    IntBuffer alphaVertices();
+    IntBuffer faceMetadata();
     List<PreparedDrawRange> drawRanges();
+    List<PreparedFaceMaterials> faceMaterials();
+}
+
+final class PreparedFaceMaterials {
+    int texturedFaceIndex();
+    int materialIdA();
+    int materialIdB();
+    int materialIdC();
 }
 
 final class PreparedDrawRange {
     int firstVertex();
     int vertexCount();
-    int materialId();
     PreparedPass pass();
 }
 
@@ -75,7 +82,17 @@ final class PreparedFrame {
 }
 ```
 
-`PreparedPass` initially has only `OPAQUE`. All returned buffers are read-only views. `PreparedFrame` carries camera, viewport, one top-level zone reference, and UI pixels; it carries no GPU ownership. The Vulkan surface handle exists only between the platform adapter and Vulkan backend: the backend destroys `VkSurfaceKHR` before the provider releases its borrowed native layer.
+Task 1 approves the packed-stream contract above. Each 28-byte vertex record contains one packed position, UVW,
+normal, and textured-face index. Each 36-byte face-metadata record contains three independently packed material
+words; `PreparedFaceMaterials.texturedFaceIndex()` is the exact index stored by the corresponding packed vertices,
+and its A/B/C IDs preserve those three associations. Draw ranges do not claim a single material invariant.
+`PreparedPass` initially has only `OPAQUE`. All returned buffers are zero-based read-only views whose private
+mutable backing buffers are transferred to `PreparedZoneGeometry`; no mutable alias may escape preparation.
+The ordinary OpenGL path writes directly to its existing mapped buffers through the shared generation routine,
+while `prepareZone` is an explicit capture/backend path. `PreparedFrame` carries camera, viewport, one top-level
+zone reference, and UI pixels; it carries no GPU ownership. The Vulkan surface handle exists only between the
+platform adapter and Vulkan backend: the backend destroys `VkSurfaceKHR` before the provider releases its borrowed
+native layer.
 
 ## Task 0: Resolve entry gates
 
@@ -98,12 +115,13 @@ final class PreparedFrame {
 - Modify: `src/main/java/rs117/hd/renderer/zone/SceneUploader.java`
 - Create: `src/main/java/rs117/hd/renderer/zone/PreparedZoneGeometry.java`
 - Create: `src/main/java/rs117/hd/renderer/zone/PreparedDrawRange.java`
+- Create: `src/main/java/rs117/hd/renderer/zone/PreparedFaceMaterials.java`
 - Create: `src/main/java/rs117/hd/renderer/zone/ZoneGeometrySink.java`
 - Test: `src/test/java/rs117/hd/renderer/zone/PreparedZoneGeometryTest.java`
 
-- [ ] Add a characterization test that records vertex/UV/normal counts, draw ranges, material IDs, and stable buffer hashes for a fixed scene fixture through the current uploader.
-- [ ] Implement immutable prepared geometry and a sink without moving GL allocation out of `ZoneUploadJob` yet.
-- [ ] Route the same CPU data to the existing GL upload and assert the characterization values are unchanged.
+- [ ] Capture BASE mapped-uploader goldens for a fixed scene, including packed streams, positions/limits, level/roof metadata, draw ranges, per-face A/B/C material IDs, and stable hashes.
+- [ ] Implement immutable prepared geometry and a sink without moving GL allocation out of `ZoneUploadJob`; transfer private prepared-buffer ownership into zero-based read-only views.
+- [ ] Keep ordinary OpenGL upload writing directly to its existing mapped buffers through the shared generation routine; make `prepareZone` explicit and assert both paths against the independent BASE goldens.
 - [ ] Run `./gradlew test --tests '*PreparedZoneGeometryTest'` and the existing renderer tests; require exact parity.
 - [ ] Independently review the seam for GL enums, handles, descriptor bindings, or synchronization; any occurrence is a task failure.
 

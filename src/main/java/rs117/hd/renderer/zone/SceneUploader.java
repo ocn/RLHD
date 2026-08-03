@@ -216,15 +216,7 @@ public class SceneUploader implements AutoCloseable {
 		var ab = zone.vboA != null ? zoneVboA.setBuffer(zone.vboA.mapped()) : null;
 		var fb = zone.tboF != null ? zoneTboF.setBuffer(zone.tboF.mapped()) : null;
 		assert zone.tboF != null;
-
-		prepareZone(ctx, zone, mzx, mzz, geometry -> {
-			if (vb != null)
-				vb.put(geometry.opaqueVertices());
-			if (ab != null)
-				ab.put(geometry.alphaVertices());
-			if (fb != null)
-				fb.put(geometry.faceMetadata());
-		});
+		generateZoneGeometry(ctx, zone, mzx, mzz, vb, ab, fb);
 	}
 
 	public void prepareZone(
@@ -237,7 +229,7 @@ public class SceneUploader implements AutoCloseable {
 		IntBuffer opaque = zone.sizeO > 0 ? IntBuffer.allocate(zone.sizeO * Zone.VERT_SIZE * 3 / Integer.BYTES) : null;
 		IntBuffer alpha = zone.sizeA > 0 ? IntBuffer.allocate(zone.sizeA * Zone.VERT_SIZE * 3 / Integer.BYTES) : null;
 		IntBuffer faces = IntBuffer.allocate(zone.sizeF * Zone.TEXTURE_SIZE / Integer.BYTES);
-		uploadZone(
+		generateZoneGeometry(
 			ctx,
 			zone,
 			mzx,
@@ -249,7 +241,7 @@ public class SceneUploader implements AutoCloseable {
 		sink.accept(new PreparedZoneGeometry(opaque, alpha, faces, zone.levelOffsets));
 	}
 
-	private void uploadZone(
+	private void generateZoneGeometry(
 		ZoneSceneContext ctx,
 		Zone zone,
 		int mzx,
