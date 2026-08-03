@@ -34,7 +34,7 @@
 
 ## Task 2 — One opaque static zone through Vulkan
 
-- Status: Task 2A review-round-1 fixes committed and awaiting rereview; Task 2B gated.
+- Status: Task 2A independently approved; controller verification pending; Task 2B gated.
 - Authorization: user explicitly requested proceeding to Task 2.
 - Scope split: Task 2A may implement API-neutral frame data, prepared-zone Vulkan upload/resource ownership, real opaque shaders, offline compilation/reflection, and deterministic non-presenting tests. Task 2B owns live surface/swapchain/presentation/readback and validation-layer acceptance.
 - Safety: no window, CAMetalLayer, Vulkan surface, swapchain, drawable, fullscreen transition, or presentation call may execute on this host.
@@ -61,3 +61,9 @@
 - Production isolation rejects all LWJGL/Vulkan/MoltenVK/native dependencies and slice/native JAR entries; Gson 2.14 is exact and isolated from production.
 - Safe verification: 5 public contract tests, 13 isolated tests, 22-task offline check, and 12-test Task 1 BASE/public regression all passed.
 - Status: fixes complete; independent rereview pending. Task 2B remains `NOT RUN`.
+
+### Task 2A final rereview
+
+- Reviewed head: `6c9e7604`.
+- Verdict: `APPROVED`; no Critical, Important, or Minor findings.
+- Confirmed: immutable scene-base/frame contract, exact parsed shader reflection with mutation rejection, negative-viewport winding/culling, zero-extent no-work evidence, production dependency/resource isolation, and explicit Task 2B `NOT RUN` boundary.
