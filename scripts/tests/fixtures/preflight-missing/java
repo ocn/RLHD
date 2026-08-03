@@ -1,0 +1,2 @@
+#!/bin/sh
+printf '    java.version = 16.0.2\n    java.vendor = Amazon.com Inc.\n    os.arch = x86_64\n' >&2

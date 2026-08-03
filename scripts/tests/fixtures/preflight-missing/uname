@@ -1,0 +1,2 @@
+#!/bin/sh
+[ "${1:-}" = -s ] && printf 'Darwin\n' || printf 'arm64\n'
