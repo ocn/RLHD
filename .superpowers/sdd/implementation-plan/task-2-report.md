@@ -1,10 +1,12 @@
 # Task 2A implementation report
 
-Status: `IMPLEMENTED_OFFLINE_AWAITING_INDEPENDENT_REVIEW`
+Status: `REVIEW_ROUND_1_FIXED_OFFLINE_AWAITING_REREVIEW`
 
 Base: `7818bd603fc8d456b64e3eac29e92e89bf351de2`
 
 Implementation commit: `865fc6ff366dd2e85f3e40e4a70a0fb7938649ec`
+
+Review-round-1 fix commit: `e86e9ce7fded0ba977411d1908b363f2af31a1c9`
 
 Task 2A locks a CPU/offline contract only. It does not establish Vulkan renderer correctness, GPU compatibility,
 presentation correctness, performance, or production readiness. Task 2B remains gated.
@@ -107,3 +109,76 @@ Final hygiene: `git diff --check` and `git diff --cached --check` exited 0 befor
 
 No `IntegrationTest`, headful task, native loader, Vulkan loader, physical-device API, device API, surface API,
 swapchain API, submit API, present API, window, or drawable was invoked during Task 2A.
+
+## Review round 1 fixes
+
+The public frame snapshot now carries API-neutral `sceneBaseX` and `sceneBaseZ` integers alongside the immutable
+camera matrix, completing the shader's exact 72-byte push payload without exposing a Vulkan type.
+
+Loose reflection substring checks were removed. `VulkanReflectionContract` parses each generated JSON document
+with Gson 2.14 confined to the `vulkanOpaqueSlice` and its test configurations. The build now runs the exact parsed
+validator as `validateVulkanOpaqueSliceReflection`. It requires:
+
+- exactly one `main` entry point with the correct stage for each shader;
+- exact input/output name, type, and location mappings, with no extras;
+- only the opaque readonly `FaceMetadata` SSBO at set 0/binding 0, containing one scalar runtime `int[]` with
+  `ArrayStride=4`;
+- only one opaque vertex push block, with column-major/default `mat4` offset 0 and matrix stride 16, `ivec2`
+  offset 64, and computed block size 72;
+- only the UI fragment `sampler2D` at set 0/binding 0; and
+- no extra descriptors, push blocks, specialization constants, stage inputs, or stage outputs.
+
+Mutation tests swap a reflected location and add an unexpected input; both are rejected. The validator is
+order-independent because descriptor and interface array ordering is not a shader-interface contract.
+
+The pure negative-height viewport projection maps an originally counter-clockwise triangle to a negative signed
+framebuffer area. The manifest now pins `CLOCKWISE` front face and `BACK` culling. Zero-extent suspension compares
+allocator creates, allocator closes, and planned-render work before/after and observes no change.
+
+Production isolation now rejects every LWJGL-named artifact, Vulkan/MoltenVK/native dependency, native library
+entry, LWJGL package entry, and opaque-slice class/resource. The isolated dependency set must be exactly
+`gson-2.14.0.jar`; the ordinary production runtime and JAR remain unchanged and contain none of it.
+
+Review-fix RED:
+
+```sh
+./gradlew --no-daemon --console=plain compileTestJava
+```
+
+Result: expected failure with three errors for the missing scene-base constructor/accessors.
+
+```sh
+env RLHD_VULKAN_SDK='.../VulkanSDK/1.4.350.1/macOS' ./gradlew --no-daemon --console=plain compileVulkanOpaqueSliceTestJava
+```
+
+Result: expected failure with 15 errors for the missing viewport/front-face, render-work, exact-reflection,
+isolation-policy, and updated frame-contract seams.
+
+Review-fix GREEN:
+
+```sh
+./gradlew --no-daemon --console=plain test --tests 'rs117.hd.renderer.PreparedFrameTest' --tests 'rs117.hd.renderer.RendererBackendContractTest'
+```
+
+Result: `BUILD SUCCESSFUL`; 5 tests, 0 failures/errors/skips.
+
+```sh
+env RLHD_VULKAN_SDK='.../VulkanSDK/1.4.350.1/macOS' ./gradlew --no-daemon --console=plain vulkanOpaqueSliceTest
+```
+
+Result: `BUILD SUCCESSFUL`; 13 tests, 0 failures/errors/skips.
+
+```sh
+env RLHD_VULKAN_SDK='.../VulkanSDK/1.4.350.1/macOS' ./gradlew --no-daemon --console=plain vulkanOpaqueSliceCheck
+```
+
+Result: `BUILD SUCCESSFUL`; 22 tasks considered, 8 executed and 14 up-to-date; exact reflection and hardened
+production isolation gates passed.
+
+```sh
+./gradlew --no-daemon --console=plain test --tests '*PreparedZoneGeometryTest' --tests 'rs117.hd.renderer.PreparedFrameTest' --tests 'rs117.hd.renderer.RendererBackendContractTest'
+```
+
+Result: `BUILD SUCCESSFUL`; 12 tests, 0 failures/errors/skips.
+
+All Task 2B/live claims listed above remain `NOT RUN` after review round 1.

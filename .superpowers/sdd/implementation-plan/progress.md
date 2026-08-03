@@ -34,12 +34,30 @@
 
 ## Task 2 — One opaque static zone through Vulkan
 
-- Status: Task 2A implementation committed and awaiting independent review; Task 2B gated.
+- Status: Task 2A review-round-1 fixes committed and awaiting rereview; Task 2B gated.
 - Authorization: user explicitly requested proceeding to Task 2.
 - Scope split: Task 2A may implement API-neutral frame data, prepared-zone Vulkan upload/resource ownership, real opaque shaders, offline compilation/reflection, and deterministic non-presenting tests. Task 2B owns live surface/swapchain/presentation/readback and validation-layer acceptance.
 - Safety: no window, CAMetalLayer, Vulkan surface, swapchain, drawable, fullscreen transition, or presentation call may execute on this host.
 - Acceptance boundary: Task 2 cannot be marked complete until Task 2B's live golden/readback and balanced lifecycle checks run safely; Task 2A may be independently reviewed and committed as partial progress.
 - Base for Task 2A: `7818bd603fc8d456b64e3eac29e92e89bf351de2`.
 - Task 2A implementation commit: `865fc6ff366dd2e85f3e40e4a70a0fb7938649ec`.
+- Task 2A review-round-1 fix commit: `e86e9ce7fded0ba977411d1908b363f2af31a1c9`.
 - Audit result: Task 2A contract is byte-exact and Vulkan-call-free; Vulkan-specific code/resources use an isolated source set and the normal JAR/runtime remain OpenGL-only.
 - Deferred `NOT RUN`: physical-device format support, MoltenVK pipeline compilation, clipping/interpolation/culling/depth parity, BGRA/gamma/Retina/UI parity, validation-layer cleanliness, GPU readback, acquire/submit/present balance, and real GPU resource retirement.
+
+### Task 2A review round 1
+
+- Reviewed head: `e9772510`.
+- Verdict: `CHANGES_REQUIRED`.
+- Important findings: public frame data omits `sceneBase` required by the 72-byte push range; reflection assertions do not enforce exact interfaces or absence of extras; negative-viewport projected winding is untested.
+- Required hardening: make zero-extent no-work evidence explicit and reject every production LWJGL/Vulkan/native or opaque-slice dependency/resource leak.
+
+### Task 2A review round 1 fixes
+
+- Fix head: `e86e9ce7fded0ba977411d1908b363f2af31a1c9`.
+- Public frame data now supplies immutable scene-base X/Z values for the exact 72-byte shader push contract.
+- Exact Gson-parsed validation covers every reflected interface and absence of unexpected descriptors, push blocks, specialization constants, inputs, and outputs; mutation tests prove drift rejection.
+- Pure CPU negative-viewport projection pins clockwise framebuffer winding/back culling; zero extent leaves allocation, close, and work counters unchanged.
+- Production isolation rejects all LWJGL/Vulkan/MoltenVK/native dependencies and slice/native JAR entries; Gson 2.14 is exact and isolated from production.
+- Safe verification: 5 public contract tests, 13 isolated tests, 22-task offline check, and 12-test Task 1 BASE/public regression all passed.
+- Status: fixes complete; independent rereview pending. Task 2B remains `NOT RUN`.
