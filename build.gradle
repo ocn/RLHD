@@ -40,17 +40,66 @@ sourceSets {
 		compileClasspath += sourceSets.macSurfaceSpike.output
 		runtimeClasspath += output + compileClasspath
 	}
+	metalControlSpike {
+		java.srcDir 'spikes/metal-control/src/main/java'
+		compileClasspath += sourceSets.macSurfaceSpike.output
+		runtimeClasspath += output + sourceSets.macSurfaceSpike.output + compileClasspath
+	}
+	metalControlSpikeTest {
+		java.srcDir 'spikes/metal-control/src/test/java'
+		compileClasspath += sourceSets.macSurfaceSpike.output + sourceSets.metalControlSpike.output
+		runtimeClasspath += output + compileClasspath
+	}
 }
 
 configurations {
 	macSurfaceSpikeTestImplementation.extendsFrom testImplementation
 	macSurfaceSpikeTestRuntimeOnly.extendsFrom testRuntimeOnly
+	metalControlSpikeTestImplementation.extendsFrom testImplementation
+	metalControlSpikeTestRuntimeOnly.extendsFrom testRuntimeOnly
 }
 
 def macSurfaceSpikeDir = file('spikes/macos-surface')
 def macSurfaceNativeDir = layout.buildDirectory.dir('spikes/macos-surface/native')
 def macSurfaceNativeLibrary = macSurfaceNativeDir.map { it.file('librlhd_mac_surface.dylib') }
 def macSurfaceNativeTestBinary = macSurfaceNativeDir.map { it.file('surface_state_test') }
+def metalControlSpikeDir = file('spikes/metal-control')
+def metalControlNativeDir = layout.buildDirectory.dir('spikes/metal-control/native')
+def metalControlNativeLibrary = metalControlNativeDir.map { it.file('librlhd_metal_control.dylib') }
+
+tasks.register('buildMetalControlNative', Exec) {
+	group = 'verification'
+	description = 'Builds the opt-in arm64 direct-Metal control renderer.'
+	inputs.property('hostOsName', providers.systemProperty('os.name'))
+	inputs.property('hostOsArch', providers.systemProperty('os.arch'))
+	inputs.property('buildJavaHome', providers.systemProperty('java.home'))
+	inputs.files(fileTree("${metalControlSpikeDir}/src/main/native") { include '**/*.h', '**/*.c', '**/*.m' })
+	outputs.file(metalControlNativeLibrary)
+
+	doFirst {
+		if (!System.getProperty('os.name').toLowerCase(java.util.Locale.ROOT).contains('mac')) {
+			throw new GradleException('The direct-Metal control spike can only be built on macOS.')
+		}
+		if (!(System.getProperty('os.arch') in ['aarch64', 'arm64'])) {
+			throw new GradleException('The direct-Metal control spike supports only an arm64 Gradle JDK/toolchain.')
+		}
+		def javaHome = file(System.getProperty('java.home'))
+		if (!file("${javaHome}/include/jni.h").isFile()) {
+			throw new GradleException("JDK JNI headers not found under ${javaHome}; run Gradle with a full arm64 JDK.")
+		}
+		metalControlNativeDir.get().asFile.mkdirs()
+		commandLine(
+			'xcrun', 'clang', '-dynamiclib', '-arch', 'arm64', '-mmacosx-version-min=11.0',
+			'-fobjc-exceptions', '-fblocks', '-Wall', '-Wextra', '-Werror',
+			'-I', file("${javaHome}/include").absolutePath,
+			'-I', file("${javaHome}/include/darwin").absolutePath,
+			file("${metalControlSpikeDir}/src/main/native/metal_control.m").absolutePath,
+			'-framework', 'Cocoa', '-framework', 'QuartzCore', '-framework', 'Metal',
+			'-undefined', 'dynamic_lookup',
+			'-o', metalControlNativeLibrary.get().asFile.absolutePath
+		)
+	}
+}
 
 tasks.register('buildMacSurfaceNative', Exec) {
 	group = 'verification'
@@ -160,6 +209,62 @@ tasks.register('macSurfaceSpikeCheck') {
 	group = 'verification'
 	description = 'Builds and tests the isolated macOS surface spike without opening a window.'
 	dependsOn tasks.named('buildMacSurfaceNative'), tasks.named('macSurfaceNativeTest'), tasks.named('macSurfaceSpikeTest')
+}
+
+tasks.named(sourceSets.metalControlSpike.compileJavaTaskName) {
+	dependsOn tasks.named(sourceSets.macSurfaceSpike.compileJavaTaskName)
+}
+
+tasks.named(sourceSets.metalControlSpikeTest.compileJavaTaskName) {
+	dependsOn tasks.named(sourceSets.macSurfaceSpike.compileJavaTaskName), tasks.named(sourceSets.metalControlSpike.compileJavaTaskName)
+}
+
+tasks.register('metalControlSpikeTest', Test) {
+	group = 'verification'
+	description = 'Runs deterministic pure tests for the opt-in direct-Metal control spike.'
+	testClassesDirs = sourceSets.metalControlSpikeTest.output.classesDirs
+	classpath = sourceSets.metalControlSpikeTest.runtimeClasspath
+	exclude '**/*IntegrationTest.class'
+}
+
+tasks.register('metalControlIntegrationTest', Test) {
+	group = 'verification'
+	description = 'Runs the opt-in headful direct-Metal presentation smoke and readback test.'
+	dependsOn tasks.named('buildMacSurfaceNative'), tasks.named('buildMetalControlNative')
+	testClassesDirs = sourceSets.metalControlSpikeTest.output.classesDirs
+	classpath = sourceSets.metalControlSpikeTest.runtimeClasspath
+	include '**/*IntegrationTest.class'
+	systemProperty 'java.awt.headless', 'false'
+	systemProperty 'rlhd.spike.metal.integration', 'true'
+	systemProperty 'rlhd.spike.macos.library', macSurfaceNativeLibrary.get().asFile.absolutePath
+	systemProperty 'rlhd.spike.metal.library', metalControlNativeLibrary.get().asFile.absolutePath
+}
+
+tasks.register('runMetalControlSpike', JavaExec) {
+	group = 'application'
+	description = 'Runs the disposable direct-Metal AWT control program.'
+	dependsOn tasks.named('buildMacSurfaceNative'), tasks.named('buildMetalControlNative'), tasks.named(sourceSets.metalControlSpike.classesTaskName)
+	classpath = sourceSets.metalControlSpike.runtimeClasspath
+	mainClass = 'rs117.hd.spikes.macos.control.MetalControlDemo'
+	systemProperty 'java.awt.headless', 'false'
+	systemProperty 'rlhd.spike.macos.library', macSurfaceNativeLibrary.get().asFile.absolutePath
+	systemProperty 'rlhd.spike.metal.library', metalControlNativeLibrary.get().asFile.absolutePath
+}
+
+tasks.register('metalControlSpikeJar', Jar) {
+	group = BasePlugin.BUILD_GROUP
+	description = 'Builds the opt-in Java-only direct-Metal control artifact.'
+	dependsOn sourceSets.macSurfaceSpike.classesTaskName, sourceSets.metalControlSpike.classesTaskName
+	archiveClassifier.set('metal-control-spike')
+	from sourceSets.macSurfaceSpike.output
+	from sourceSets.metalControlSpike.output
+}
+
+tasks.register('metalControlSpikeCheck') {
+	group = 'verification'
+	description = 'Builds and runs non-headful checks for the isolated direct-Metal control spike.'
+	dependsOn tasks.named('buildMacSurfaceNative'), tasks.named('buildMetalControlNative'),
+		tasks.named('macSurfaceNativeTest'), tasks.named('macSurfaceSpikeTest'), tasks.named('metalControlSpikeTest')
 }
 
 def props = new Properties()
