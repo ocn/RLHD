@@ -47,3 +47,7 @@ No renderer production code, dependencies, installed tools, or external reposito
 - Added an outside-repository test that changes to the worktree's parent, unsets `PREFLIGHT_GRADLE_WRAPPER_PROPERTIES`, invokes `./RLHD-modern-renderer/scripts/renderer-preflight.sh` through a relative path with deterministic tool fixtures, and requires the Gradle wrapper pass plus ready status.
 - Fresh syntax check: exit `0`.
 - Fresh shell tests from repository root and from `scripts/tests`: both exit `0` with `renderer-preflight shell tests: PASS`.
+
+## Evidence correction: Round 4
+
+- Corrected the Metal toolchain evidence: `xcrun -f metal` exits `0` and resolves the Xcode-default `metal` path, while `xcrun metal --version` exits `72` reporting a missing Metal Toolchain and `xcrun -f metallib` fails. The component download remains blocked: `xcodebuild -downloadComponent metalToolchain` exits `70` on the `IDESimulatorFoundation`/`DVTDownloads` symbol mismatch.
