@@ -36,6 +36,12 @@ OpenGL is a behavioral reference, not a requirement for byte-identical rasteriza
 
 Approve numeric image tolerances before the first real-scene comparison. Do not raise them after seeing a failure without an independent rendering review. UI pixels and the synthetic Task 3/4 controls remain exact where no filtering or color-space conversion is expected.
 
+### Task 1 BASE offscreen oracle
+
+The fixed Task 1 BASE slice uses a bounded 64x64 oracle: exact mapped-uploader vertex and face hashes, exactly 18 opaque vertices, an all-pixel scene mask covering x/y 6 through 57, exact black outside that mask and exact alpha, two interior scene RGB samples with absolute per-channel tolerance 2, and an all-pixel exact-UI-over-scene composition check. Opaque and transparent UI quadrants are exact; the half-alpha premultiplied quadrant permits one integer channel value for UNORM rounding. The canonical descriptor is pinned by SHA-256 `4577074de8e78763bc9a4c63aedcf179d68746ba6958d82dde2cc2539e51f2df` in the test fixture.
+
+This oracle detects packing, camera, coverage, color, UI blending, and readback regressions in the deterministic Vulkan slice. The paired BASE geometry and constant clip depth do not independently prove front-face selection or reverse-Z near/far ordering; dedicated control fixtures remain required for those states. It is not an OpenGL equivalence tolerance and cannot approve broader scene correctness. The first OpenGL-versus-Vulkan full-image comparison still requires separately registered maximum/mean/outlier thresholds and an independently reviewed edge mask.
+
 ## Shader build gates
 
 - Compile every enumerated variant, including macOS fallback branches, on Java 11 CI.

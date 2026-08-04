@@ -1,16 +1,7 @@
 package rs117.hd.spikes.vulkan.offscreen;
 
-import java.lang.reflect.Constructor;
-import java.nio.ByteBuffer;
-import java.nio.IntBuffer;
 import org.junit.Assume;
 import org.junit.Test;
-import rs117.hd.renderer.CameraUniforms;
-import rs117.hd.renderer.PreparedFrame;
-import rs117.hd.renderer.PreparedUiTexture;
-import rs117.hd.renderer.SurfaceExtent;
-import rs117.hd.renderer.ZoneKey;
-import rs117.hd.renderer.zone.PreparedZoneGeometry;
 import rs117.hd.spikes.vulkan.opaque.VulkanOpaqueZoneContract;
 
 import static org.junit.Assert.assertEquals;
@@ -19,7 +10,7 @@ import static org.junit.Assert.assertTrue;
 public class VulkanOffscreenIntegrationTest
 {
 	@Test
-	public void rendersPreparedOpaqueTriangleAndTransparentUiToReadback() throws Exception
+	public void rendersTask1BaseZoneAndExactUiToReadback() throws Exception
 	{
 		Assume.assumeTrue(Boolean.getBoolean("rlhd.spike.vulkan.offscreen.integration"));
 		VulkanOffscreenRenderer renderer = VulkanOffscreenRenderer.open();
@@ -27,10 +18,14 @@ public class VulkanOffscreenIntegrationTest
 		{
 			assertTrue("Validation layer must be enabled for live offscreen acceptance", renderer.validationEnabled());
 			int baselineHandles = renderer.liveHandleCount();
-			VulkanOffscreenRenderer.Result result = renderer.render(triangle(), frame(new byte[16]));
+			VulkanOpaqueZoneContract.PreparedUpload upload = Task1VulkanFixture.upload();
+			assertEquals(Task1VulkanFixture.OPAQUE_SHA256, Task1VulkanFixture.sha256Words(upload.vertexBytes()));
+			assertEquals(Task1VulkanFixture.FACE_SHA256, Task1VulkanFixture.sha256Words(upload.faceMetadataBytes()));
+			VulkanOffscreenRenderer.Result result = renderer.render(
+				upload, Task1VulkanFixture.frame(new byte[16]));
 			assertEquals(64, result.width());
 			assertEquals(64, result.height());
-			assertEquals(3, result.opaqueVertexCount());
+			assertEquals(18, result.opaqueVertexCount());
 			assertEquals(64 * 64 * 4, result.bgra().length);
 			int coloredPixels = 0;
 			int opaqueAlphaPixels = 0;
@@ -41,19 +36,16 @@ public class VulkanOffscreenIntegrationTest
 					coloredPixels++;
 				if ((pixels[offset + 3] & 0xff) == 255) opaqueAlphaPixels++;
 			}
-			byte[] solidUi = new byte[16];
-			for (int offset = 0; offset < solidUi.length; offset += 4) { solidUi[offset + 2] = (byte) 128; solidUi[offset + 3] = (byte) 128; }
-			VulkanOffscreenRenderer.Result uiResult = renderer.render(empty(), frame(solidUi));
-			int uiColoredPixels = 0;
-			byte[] uiPixels = uiResult.bgra();
-			for (int offset = 0; offset < uiPixels.length; offset += 4)
-			{
-				if ((uiPixels[offset] & 0xff) != 0 || (uiPixels[offset + 1] & 0xff) != 0 || (uiPixels[offset + 2] & 0xff) != 0)
-					uiColoredPixels++;
-			}
-			assertTrue("Expected render-pass clear/readback alpha; alpha255=" + opaqueAlphaPixels, opaqueAlphaPixels > 4000);
-			assertTrue("Expected UI composition in GPU readback; uiColored=" + uiColoredPixels, uiColoredPixels > 4000);
-			assertTrue("Expected an opaque clockwise triangle; colored=" + coloredPixels, coloredPixels > 256);
+			assertEquals("Every output pixel must retain opaque alpha", 64 * 64, opaqueAlphaPixels);
+			assertEquals("Task 1 top-down footprint must cover the analytic 52x52 pixel-center region", 52 * 52, coloredPixels);
+			assertSceneMask(pixels);
+			assertPixel(pixels, 2, 2, 0, 0, 0, 255, 0);
+			assertPixel(pixels, 48, 16, 59, 59, 67, 255, 2);
+			assertPixel(pixels, 16, 48, 40, 41, 46, 255, 2);
+
+			VulkanOffscreenRenderer.Result composedResult = renderer.render(
+				upload, Task1VulkanFixture.frame(Task1VulkanFixture.exactUi()));
+			assertComposedFrame(pixels, composedResult.bgra());
 			assertEquals(baselineHandles, renderer.liveHandleCount());
 		}
 		finally
@@ -66,48 +58,70 @@ public class VulkanOffscreenIntegrationTest
 		assertEquals(0, renderer.validationErrorCount());
 	}
 
-	private static VulkanOpaqueZoneContract.PreparedUpload triangle() throws Exception
+	private static void assertSceneMask(byte[] pixels)
 	{
-		int[] vertices = {
-			pack(-1, -1), pack(0, 0), 0, 0, 0, 0, 0,
-			pack(0, 1), pack(0, 0), 0, 0, 0, 0, 0,
-			pack(1, -1), pack(0, 0), 0, 0, 0, 0, 0
-		};
-		int[] metadata = { 30, 40, 20, 0, 0, 0, 0, 0, 0 };
-		Constructor<PreparedZoneGeometry> constructor = PreparedZoneGeometry.class.getDeclaredConstructor(
-			IntBuffer.class, IntBuffer.class, IntBuffer.class, int[].class);
-		constructor.setAccessible(true);
-		PreparedZoneGeometry geometry = constructor.newInstance(written(vertices), written(new int[0]),
-			written(metadata), new int[] { vertices.length });
-		return VulkanOpaqueZoneContract.prepare(geometry);
+		for (int y = 0; y < 64; y++)
+		{
+			for (int x = 0; x < 64; x++)
+			{
+				int offset = (y * 64 + x) * 4;
+				boolean nonBlack = (pixels[offset] & 0xff) != 0 || (pixels[offset + 1] & 0xff) != 0 ||
+					(pixels[offset + 2] & 0xff) != 0;
+				assertEquals("scene mask at " + x + ',' + y, x >= 6 && x <= 57 && y >= 6 && y <= 57, nonBlack);
+				assertEquals("scene alpha at " + x + ',' + y, 255, pixels[offset + 3] & 0xff);
+			}
+		}
 	}
 
-	private static VulkanOpaqueZoneContract.PreparedUpload empty() throws Exception
+	private static void assertComposedFrame(byte[] scene, byte[] composed)
 	{
-		Constructor<PreparedZoneGeometry> constructor = PreparedZoneGeometry.class.getDeclaredConstructor(
-			IntBuffer.class, IntBuffer.class, IntBuffer.class, int[].class);
-		constructor.setAccessible(true);
-		return VulkanOpaqueZoneContract.prepare(constructor.newInstance(
-			written(new int[0]), written(new int[0]), written(new int[0]), new int[0]));
+		for (int y = 0; y < 64; y++)
+		{
+			for (int x = 0; x < 64; x++)
+			{
+				int offset = (y * 64 + x) * 4;
+				if (y < 32 && x < 32)
+				{
+					assertChannel(composed, offset, roundedHalf(scene[offset] & 0xff), 1, "half-red blue", x, y);
+					assertChannel(composed, offset + 1, roundedHalf(scene[offset + 1] & 0xff), 1, "half-red green", x, y);
+					assertChannel(composed, offset + 2, 128 + roundedHalf(scene[offset + 2] & 0xff), 1, "half-red red", x, y);
+				}
+				else if (y < 32)
+				{
+					assertPixel(composed, x, y, 0, 255, 0, 255, 0);
+				}
+				else if (x < 32)
+				{
+					assertPixel(composed, x, y, scene[offset] & 0xff, scene[offset + 1] & 0xff,
+						scene[offset + 2] & 0xff, 255, 0);
+				}
+				else
+				{
+					assertPixel(composed, x, y, 255, 0, 0, 255, 0);
+				}
+				assertEquals("composed alpha at " + x + ',' + y, 255, composed[offset + 3] & 0xff);
+			}
+		}
 	}
 
-	private static PreparedFrame frame(byte[] uiBytes)
+	private static int roundedHalf(int value)
 	{
-		PreparedUiTexture ui = new PreparedUiTexture(2, 2, 8,
-			PreparedUiTexture.PixelFormat.BGRA8_SRGB_PREMULTIPLIED, ByteBuffer.wrap(uiBytes));
-		return new PreparedFrame(new ZoneKey(0, 0, 0, 1), new CameraUniforms(new float[] {
-			1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1
-		}), 0, 0, new SurfaceExtent(64, 64), ui);
+		return Math.round(value * (127f / 255f));
 	}
 
-	private static IntBuffer written(int[] values)
+	private static void assertChannel(byte[] pixels, int offset, int expected, int tolerance, String label, int x, int y)
 	{
-		IntBuffer result = IntBuffer.allocate(values.length);
-		return result.put(values);
+		assertTrue(label + " at " + x + ',' + y,
+			Math.abs((pixels[offset] & 0xff) - expected) <= tolerance);
 	}
 
-	private static int pack(int low, int high)
+	private static void assertPixel(byte[] pixels, int x, int y, int blue, int green, int red, int alpha, int rgbTolerance)
 	{
-		return (low & 0xffff) | (high << 16);
+		int offset = (y * 64 + x) * 4;
+		assertTrue("blue at " + x + ',' + y, Math.abs((pixels[offset] & 0xff) - blue) <= rgbTolerance);
+		assertTrue("green at " + x + ',' + y, Math.abs((pixels[offset + 1] & 0xff) - green) <= rgbTolerance);
+		assertTrue("red at " + x + ',' + y, Math.abs((pixels[offset + 2] & 0xff) - red) <= rgbTolerance);
+		assertEquals("alpha at " + x + ',' + y, alpha, pixels[offset + 3] & 0xff);
 	}
+
 }
