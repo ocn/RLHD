@@ -11,7 +11,7 @@
 
 The isolated surface-free Vulkan slice is viable on this host. It created a portability-enumerated instance, selected the Apple M3 Ultra graphics queue, enabled `VK_KHR_portability_subset`, created opaque/depth/UI pipelines, uploaded packed geometry and premultiplied BGRA UI data, submitted offscreen commands, copied BGRA8 output to host memory, and destroyed every app-tracked handle.
 
-Run `R-20260804-009` passed the CPU-factored Task 1 BASE semantics and initial bounded image checks with `VK_LAYER_KHRONOS_validation` and `VK_EXT_debug_utils` enabled: zero validation warnings and zero validation errors from instance creation through destruction, including teardown-time messages checked after close. Review subsequently required all-pixel coverage and exact-UI-over-scene composition; those stronger checks are pending a committed-oracle rerun. It did not create an AWT window, native layer, Vulkan surface, swapchain, acquire operation, present operation, fullscreen state, or display transition. No host panic occurred.
+Run `R-20260804-018` freshly executed all 19 tasks against pinned commit `d8e430f67add211e02ac7f89f317fd85a8e9f191`. The complete analytic scene mask and exact-UI-over-BASE composition passed with `VK_LAYER_KHRONOS_validation` and `VK_EXT_debug_utils` enabled: zero validation warnings and zero validation errors from instance creation through destruction, including teardown-time messages checked after close. It did not create an AWT window, native layer, Vulkan surface, swapchain, acquire operation, present operation, fullscreen state, or display transition. No host panic occurred.
 
 The first two GPU runs isolated an incorrect CPU winding assumption. Clear/readback and UI composition passed while the original triangle produced zero colored pixels. Reversing the triangle rendered; the pure contract was corrected so `VK_FRONT_FACE_CLOCKWISE` with a negative-height viewport recognizes a positive value from this helper's y-down cross-product convention, which is opposite Vulkan's signed-area convention. The normalized and validation-enabled runs then passed.
 
@@ -20,7 +20,7 @@ The first two GPU runs isolated an incorrect CPU winding assumption. Clear/readb
 - Vulkan 1.2 instance, physical-device, logical-device, and graphics-queue lifecycle through MoltenVK.
 - Required BGRA8, D32, signed-short, half-float, and signed-int format capabilities are checked before device selection.
 - Exact 28-byte opaque vertex binding and scalar storage-buffer metadata interface compile into live pipelines.
-- Task 1 mapped-uploader vertex and face hashes, 18-vertex BASE fixture, analytic footprint count, two interior RGB samples at tolerance 2, and sampled background/alpha/UI pixels in run `R-20260804-009`. The stronger pinned all-pixel coverage/composition oracle remains pending a live rerun.
+- Exact Task 1 mapped-uploader vertex and face hashes, 18-vertex BASE fixture, all-pixel analytic coverage/background/alpha, two interior RGB samples at tolerance 2, and all-pixel exact-UI-over-scene composition in run `R-20260804-018`.
 - Reverse-Z state: `D32_SFLOAT`, clear `0`, and `GREATER_OR_EQUAL`.
 - Negative-height viewport, clockwise front face, and back-face culling with a live winding check.
 - Premultiplied UI blend using `ONE` and `ONE_MINUS_SRC_ALPHA`.
@@ -47,4 +47,4 @@ The first two GPU runs isolated an incorrect CPU winding assumption. Clear/readb
   -PvulkanOffscreenAcknowledgement=I_ACCEPT_OFFSCREEN_GPU_WORK
 ```
 
-The append-only run evidence is in [panic-investigation-runs.jsonl](panic-investigation-runs.jsonl), runs `R-20260803-001` through `R-20260804-009`.
+The append-only run evidence is in [panic-investigation-runs.jsonl](panic-investigation-runs.jsonl), runs `R-20260803-001` through `R-20260804-018`.

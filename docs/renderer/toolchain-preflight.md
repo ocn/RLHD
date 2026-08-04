@@ -25,3 +25,9 @@ Project-local, temporary tools now exist under `/private/tmp/rlhd-toolchains` fo
 - A discoverable Vulkan loader and MoltenVK runtime.
 
 This provisioning is under `/private/tmp`; it is not a system installation and must not be assumed to persist into another session. When these project-local paths are active, strict preflight remains **NOT READY only because the Metal compiler is unavailable**. `xcrun -f metal` exits `0` and resolves `/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/metal`; `xcrun metal --version` exits `1` reporting a missing Metal Toolchain; and `xcrun -f metallib` exits `72`. `xcodebuild -downloadComponent metalToolchain` exits `70` because of the current `IDESimulatorFoundation`/`DVTDownloads` symbol mismatch. Apple documents Metal tooling as an Xcode component and the `metal`/`metallib` command-line flow. [Apple Metal tools](https://developer.apple.com/metal/tools/) · [Metal command-line tools](https://developer.apple.com/library/archive/documentation/Miscellaneous/Conceptual/MetalProgrammingGuide/Dev-Technique/Dev-Technique.html)
+
+## Persistent Vulkan state (2026-08-04)
+
+The host now has arm64 Homebrew installations of OpenJDK 21, `glslang`, SPIR-V Tools, SPIRV-Cross, `vulkan-loader`, `vulkan-validationlayers`, and MoltenVK. The default shell still selects x86_64 Corretto 16, so live Vulkan tests must set `JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home` and `RLHD_VULKAN_LOADER=/opt/homebrew/opt/vulkan-loader/lib/libvulkan.1.dylib`.
+
+Homebrew's validation manifest uses a basename library path that was not resolved by the Gradle test process. Run `VK_LAYER_PATH` against an ignored manifest under `build/rlhd-vulkan-layer` whose `library_path` is `/opt/homebrew/opt/vulkan-validationlayers/lib/libVkLayer_khronos_validation.dylib`. Run `R-20260804-018` used that setup successfully; it remains surface-free and does not authorize a presentation rung.
