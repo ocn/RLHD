@@ -1,5 +1,7 @@
 # Vulkan ZoneRenderer Vertical-Slice Implementation Plan
 
+> **2026-08-04 pivot:** Tasks completed through the surface-free Task 1 oracle remain valid evidence. Do not execute the remaining RLHD-local Vulkan surface, swapchain, presentation, or backend-selection tasks. Maintainer guidance and source inspection selected `gpu-vulkan` as the foundation for future feature work. See [ADR-0002](ADR-0002-gpu-vulkan-foundation.md), the [PR #20 assessment](gpu-vulkan-pr20-assessment.md), and the [replacement feature-port plan](gpu-vulkan-feature-port-plan.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Prove one real, static, opaque 117HD zone can be prepared once and rendered by either unchanged OpenGL or an opt-in Vulkan backend, without beginning a production port.
@@ -105,7 +107,7 @@ results. The Vulkan surface handle exists only between the platform adapter and 
 - Review prior art: pinned `dennisdevulder/gpu-vulkan`
 
 - [ ] Obtain named 117HD, RuneLite, and rlawt owners for renderer review, native-surface ownership, and packaging.
-- [ ] Record whether to collaborate with `gpu-vulkan`, extract a bounded module, or build independently, including license/API reasons.
+- [x] Record the directional decision to collaborate with `gpu-vulkan` rather than build independently. Exact contribution repository, primary-renderer seam, and reviewer remain blocking questions under ADR-0002.
 - [ ] Complete the Task 4 30-minute lifecycle and multi-display checks; record footprint samples and whether the 50/49 MB diagnostic plateaus.
 - [ ] Run `scripts/renderer-preflight.sh --check` and save its complete output.
 - [ ] Stop with no code changes unless every entry gate is `GO`.
@@ -164,6 +166,8 @@ presentation rung remains `NOT RUN`. Full Task 2 completion requires both parts.
 
 ### Task 2B: Execute the live opaque-zone slice safely
 
+> **Status:** completed surface-free evidence is retained; every uncompleted RLHD-local production/presentation item below is superseded and must not be executed.
+
 **Files (provisional until owner and packaging gates resolve):**
 
 - Create: `src/main/java/rs117/hd/renderer/vulkan/VulkanRendererBackend.java`
@@ -186,6 +190,8 @@ presentation rung remains `NOT RUN`. Full Task 2 completion requires both parts.
 
 ## Task 3: Add opt-in selection and safe fallback
 
+> **Status:** superseded by the gpu-vulkan foundation decision. Do not add Vulkan selection to `HdPlugin`.
+
 **Files:**
 
 - Modify: `src/main/java/rs117/hd/HdPlugin.java`
@@ -199,6 +205,8 @@ presentation rung remains `NOT RUN`. Full Task 2 completion requires both parts.
 - [ ] Build the normal jar and prove it retains existing OpenGL behavior on all CI operating systems.
 
 ## Task 4: Decide whether the slice warrants expansion
+
+> **Status:** benchmark and correctness criteria remain reusable, but expansion occurs through the replacement gpu-vulkan feature-port plan.
 
 **Files:**
 

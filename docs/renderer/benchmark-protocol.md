@@ -12,7 +12,7 @@ Record before each run group:
 - account/world, client window position and pixel size, UI scale, camera position/heading/pitch/zoom, route, assets/cache state, and start tick;
 - every 117HD setting, including draw distance, extended loading, textures, shadows, dynamic lights, tiled lighting, parallax, anti-aliasing, frame cap, and synchronization mode.
 
-Use the same RuneLite build, account state, scene, camera, resolution, display, UI pixels, settings, written manual route checklist, and warm-up for both backends. Save configuration exports and a reference screenshot. Do not use automated gameplay input; the checklist is executed manually and records deviations. A changed scene, missing tool, x86_64 JVM on arm64, thermal event, background update, or feature mismatch invalidates the comparison and is reported separately.
+Use the same RuneLite build, account state, scene, camera, resolution, display, UI pixels, written manual route checklist, and warm-up for all comparable modes. During incremental work, collect stock `gpu-vulkan` and HD-slice runs to measure the cost of the single added feature; compare against 117HD OpenGL only where enabled features and settings are equivalent. Save configuration exports and a reference screenshot. Do not use automated gameplay input; the checklist is executed manually and records deviations. A changed scene, missing tool, x86_64 JVM on arm64, thermal event, background update, or feature mismatch invalidates the comparison and is reported separately.
 
 ## Required scenes
 
@@ -66,8 +66,8 @@ Capture the pre/post boundary metrics, uptime, process IDs, logs, and settings e
 
 ## Result validity and fallback
 
-- The control is the unchanged OpenGL renderer.
-- A Vulkan run must also test failed preflight/startup and successful return to OpenGL.
+- Released 117HD OpenGL is the feature-parity and rollback control; stock `gpu-vulkan` is the incremental Vulkan control for each HD slice.
+- An HD Vulkan run must also test failed HD selection and successful return to stock `BaseRenderer`; whole-backend failure recovery is recorded separately.
 - Compare performance only at equivalent feature parity; otherwise report feasibility/correctness metrics only.
 - Apply the preregistered feature-parity thresholds: no p95 regression over 5% in any scene, plus either at least 15% p95 improvement or at least 20% combined RuneLite+WindowServer CPU reduction in two demanding scenes, unless maintainers approved replacements before collection.
 - Publish raw JSONL/CSV, exact commands, preflight output, screenshots/readbacks, and invalidated-run reasons.

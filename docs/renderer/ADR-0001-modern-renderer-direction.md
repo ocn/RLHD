@@ -1,6 +1,6 @@
 # ADR-0001: modern renderer direction
 
-**Status:** hold production port; accepted for gated local-fork experiments only.
+**Status:** superseded in part by [ADR-0002](ADR-0002-gpu-vulkan-foundation.md). Retained for control evidence, OpenGL fallback, and decision history.
 
 ## Decision
 

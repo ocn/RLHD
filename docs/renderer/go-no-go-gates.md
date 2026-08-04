@@ -2,22 +2,22 @@
 
 Gate state is `GO`, `NO-GO`, or `NOT RUN`. Missing evidence is never `GO`.
 
-## Entry gates for a real ZoneRenderer slice
+## Entry gates for a real gpu-vulkan HD slice
 
 | Gate | Evidence required | Current state |
 | --- | --- | --- |
-| Vulkan control correctness | independent review; zero validation warnings/errors; all failure injections clean; app-tracked native objects zero | `GO` at `2687ffef`; final review passed |
-| Manual surface lifecycle | 30 minutes of resize, suspend/restore, fullscreen, present-mode changes, and repeated create/close; multi-display/Retina migration | `NOT RUN` |
-| Retained-memory bound | determine whether MoltenVK's 50/49 MB teardown diagnostic and process/GPU footprints plateau rather than grow across cycles | `NOT RUN`; ownership unresolved |
-| Review ownership | named 117HD GPU reviewer and long-term backend owner | `NO-GO` until answered |
-| Native surface ownership | RuneLite/rlawt owner accepts the API/lifecycle location or explicitly declines upstream | `NO-GO` until answered |
-| Distribution | written Plugin Hub/local-fork route for JNI, MoltenVK, signatures, SBOM, licenses, and updates | `NO-GO` until answered |
-| Prior-art decision | documented collaborate/extract/build decision with `gpu-vulkan` author/maintainers | `NO-GO` until answered |
-| Shader feasibility | one real opaque-zone vertex/fragment variant compiles and validates as SPIR-V; reflected layouts match Java packing | `NOT RUN` |
-| Fallback design | review proves backend selection precedes GL context creation and failed startup returns safely to OpenGL | `NOT RUN` |
+| Foundation decision | written decision to collaborate with `gpu-vulkan` rather than duplicate its platform/frame lifecycle | `GO` directionally; ADR-0002 records the pivot |
+| Contribution repository | `gpu-vulkan` owner names standalone or parent `runelite-vkport` repository and branch | `NO-GO` until answered |
+| Primary scene ownership | owner selects `BaseRenderer` deepening or an exclusive primary-renderer slot; additive double-rendering is impossible | `NO-GO` until answered |
+| Review ownership | named `gpu-vulkan` and HD renderer reviewers accept per-slice review | `NO-GO` until answered |
+| macOS baseline provenance | reproduce the exact PR #20 commit/configuration or obtain the complete environment behind the relayed 200-hour result | `NOT RUN`; maintainer testimony is not a reproducible baseline |
+| Presentation isolation | compare standard `vkQueuePresentKHR` and custom Metal presentation as separate panic-ledger rungs | `NOT RUN` |
+| Distribution | written local/standalone or upstream route for JNI, MoltenVK, signatures, SBOM, licenses, and updates | `NO-GO` until answered; Plugin Hub forbids JNI |
+| Cross-platform baseline | pinned Windows/Linux native Vulkan and macOS MoltenVK builds pass before HD changes | `NOT RUN` |
+| HD shader/fixture feasibility | migrate the fixed BASE fixture/oracle through backend-owned abstractions with zero validation warnings/errors | `NOT RUN`; the RLHD-local oracle is `GO` evidence only |
 | Jagex-policy check | fresh policy review recorded separately from technical/upstream acceptance | `NOT RUN` |
 
-Do not begin Task 1 in [implementation-plan.md](implementation-plan.md) while any entry gate is `NO-GO` or `NOT RUN`.
+Do not begin Task 1 in the [gpu-vulkan feature-port plan](gpu-vulkan-feature-port-plan.md) while Task 0's repository, seam, or review-owner gate is `NO-GO` or `NOT RUN`. The completed RLHD surface-free experiments remain evidence and do not override these gates.
 
 ## Vertical-slice success criteria
 
